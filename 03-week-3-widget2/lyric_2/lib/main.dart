@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:audioplayers/audioplayers.dart';
+
+import 'dart:async';
 
 import 'mahasiswa.dart';
 import 'lagu.dart';
@@ -25,8 +28,56 @@ class GunawanApp extends StatelessWidget {
   }
 }
 
-class LyricHomePage extends StatelessWidget {
+class LyricHomePage extends StatefulWidget {
   const LyricHomePage({super.key});
+
+  @override
+  State<LyricHomePage> createState() => _LyricHomePageState();
+}
+
+class _LyricHomePageState extends State<LyricHomePage> {
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  PlayerState _playerState = PlayerState.stopped;
+  late final StreamSubscription<PlayerState> _playerStateSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _playerStateSubscription = _audioPlayer.onPlayerStateChanged.listen((
+      state,
+    ) {
+      if (!mounted) return;
+
+      setState(() {
+        _playerState = state;
+      });
+    });
+  }
+
+  Future<void> _togglePlayback() async {
+    try {
+      if (_playerState == PlayerState.playing) {
+        await _audioPlayer.pause();
+      } else if (_playerState == PlayerState.paused) {
+        await _audioPlayer.resume();
+      } else {
+        await _audioPlayer.play(AssetSource('song.mp3'));
+      }
+    } catch (error) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Audio gagal diputar: $error')));
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_playerStateSubscription.cancel());
+    unawaited(_audioPlayer.dispose());
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -244,9 +295,13 @@ class LyricHomePage extends StatelessWidget {
                       onPressed: () {},
                     ),
                     IconButton(
-                      icon: const Icon(Icons.play_arrow),
+                      icon: Icon(
+                        _playerState == PlayerState.playing
+                            ? Icons.pause
+                            : Icons.play_arrow,
+                      ),
                       color: const Color.fromARGB(255, 0, 0, 0),
-                      onPressed: () {},
+                      onPressed: _togglePlayback,
                     ),
                     IconButton(
                       icon: const Icon(Icons.pause),

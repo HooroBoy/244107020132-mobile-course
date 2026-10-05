@@ -304,11 +304,6 @@ class _LyricHomePageState extends State<LyricHomePage> {
                       onPressed: _togglePlayback,
                     ),
                     IconButton(
-                      icon: const Icon(Icons.pause),
-                      color: const Color.fromARGB(255, 0, 0, 0),
-                      onPressed: () {},
-                    ),
-                    IconButton(
                       icon: const Icon(Icons.skip_next),
                       color: const Color.fromARGB(255, 0, 0, 0),
                       onPressed: () {},

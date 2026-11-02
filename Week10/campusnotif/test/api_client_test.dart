@@ -1,41 +1,33 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:campusnotif/data/api_client.dart';
-import 'package:campusnotif/data/auth_repository.dart';
-import 'package:campusnotif/data/token_store.dart';
+import 'package:campusnotif/data/http/api_client.dart';
+import 'package:campusnotif/domain/entities/auth_session.dart';
+import 'package:campusnotif/domain/errors/auth_exception.dart';
+import 'package:campusnotif/domain/repositories/auth_repository.dart';
+import 'package:campusnotif/domain/repositories/session_repository.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Token store di memori (tanpa secure storage sungguhan).
-class MemoryTokenStore extends TokenStore {
-  MemoryTokenStore({this.access, this.refresh});
+/// Penyimpanan sesi di memori (tanpa secure storage sungguhan).
+class FakeSessionRepository implements SessionRepository {
+  FakeSessionRepository({this.access, this.refresh});
 
   String? access;
   String? refresh;
   int clearCount = 0;
 
   @override
-  Future<String?> readAccess() async => access;
-
-  @override
-  Future<String?> readRefresh() async => refresh;
-
-  @override
-  Future<String?> readEmail() async => null;
-
-  @override
-  Future<void> save({
-    required String access,
-    required String refresh,
-    String? email,
-  }) async {
-    this.access = access;
-    this.refresh = refresh;
+  Future<AuthSession?> read() async {
+    if (access == null) return null;
+    return AuthSession(access: access!, refresh: refresh ?? '');
   }
 
   @override
-  Future<bool> hasSession() async => access != null;
+  Future<void> save(AuthSession session) async {
+    access = session.access;
+    refresh = session.refresh;
+  }
 
   @override
   Future<void> clear() async {
@@ -103,17 +95,21 @@ class DeadRefreshRepository implements AuthRepository {
   Future<String> refresh(String refreshToken) async {
     throw const AuthException('Refresh token ditolak server');
   }
+
+  @override
+  Future<void> signOut() async {}
 }
 
 void main() {
   test('401 -> refresh sekali -> request diulang dan sukses', () async {
-    final store = MemoryTokenStore(access: 'access-basi', refresh: 'refresh-ok');
+    final store =
+        FakeSessionRepository(access: 'access-basi', refresh: 'refresh-ok');
     final adapter = ScriptedAdapter(validToken: 'access-baru');
     var sessionExpiredCalls = 0;
 
     // Repository yang mengembalikan access token yang diterima adapter.
     final dio = buildApiClient(
-      store: store,
+      sessions: store,
       auth: _RenewingRepository('access-baru'),
       onSessionExpired: () async => sessionExpiredCalls++,
     )..httpClientAdapter = adapter;
@@ -131,12 +127,13 @@ void main() {
   });
 
   test('refresh mati -> sesi dibersihkan, tidak ada retry berulang', () async {
-    final store = MemoryTokenStore(access: 'access-basi', refresh: 'refresh-mati');
+    final store =
+        FakeSessionRepository(access: 'access-basi', refresh: 'refresh-mati');
     final adapter = ScriptedAdapter(validToken: 'tidak-pernah-dipakai');
     var sessionExpiredCalls = 0;
 
     final dio = buildApiClient(
-      store: store,
+      sessions: store,
       auth: const DeadRefreshRepository(),
       onSessionExpired: () async => sessionExpiredCalls++,
     )..httpClientAdapter = adapter;
@@ -153,12 +150,12 @@ void main() {
   });
 
   test('tanpa refresh token tersimpan -> langsung bersihkan sesi', () async {
-    final store = MemoryTokenStore(access: 'access-basi');
+    final store = FakeSessionRepository(access: 'access-basi');
     final adapter = ScriptedAdapter(validToken: 'apa-saja');
     var sessionExpiredCalls = 0;
 
     final dio = buildApiClient(
-      store: store,
+      sessions: store,
       auth: _RenewingRepository('apa-saja'),
       onSessionExpired: () async => sessionExpiredCalls++,
     )..httpClientAdapter = adapter;
@@ -188,4 +185,7 @@ class _RenewingRepository implements AuthRepository {
 
   @override
   Future<String> refresh(String refreshToken) async => newAccess;
+
+  @override
+  Future<void> signOut() async {}
 }

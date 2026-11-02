@@ -52,34 +52,52 @@ pengumuman, terbukti pada ketiga app state.
 
 ## Struktur
 
+Arsitektur **layer-first**: `domain` menetapkan kontrak, `data` menyediakan
+implementasinya, `presentation` memakainya. Aturan dependensinya satu arah —
+`presentation → domain ← data` — sehingga tidak ada UI yang meng-import Firebase.
+
 ```text
 lib/
-├── main.dart                     # bootstrap Firebase + ProviderScope
-├── routes.dart                   # konstanta path (dipakai router & FCM)
-├── data/
-│   ├── token_store.dart          # satu-satunya pintu token
-│   ├── auth_repository.dart      # Firebase Auth + fallback mock + refresh
-│   ├── api_client.dart           # Dio + interceptor 401 -> refresh -> retry
-│   ├── api_errors.dart           # DioException -> pesan ramah
-│   ├── device_repository.dart    # POST/DELETE /devices
-│   ├── notification_store.dart   # kotak masuk notifikasi + KeyValueStore
-│   ├── badge_service.dart        # angka badge pada ikon aplikasi
-│   ├── relative_time.dart        # "5 mnt lalu" (fungsi murni)
-│   └── masking.dart              # maskSecret()
-├── providers/
-│   ├── auth_provider.dart        # AuthNotifier, apiClientProvider, firebaseReady
-│   ├── app_router.dart           # GoRouter + redirect guard
-│   ├── notification_providers.dart # NotificationCenter + sinkron badge
-│   └── push_providers.dart       # PushController + PushState
-├── messaging/
-│   ├── firebase_bootstrap.dart   # init Firebase + background handler top-level
-│   ├── payload.dart              # routeFromMessage / idFromMessage (fungsi murni)
-│   └── push_service.dart         # permission, token, 3 handler, topik, suara
-└── pages/
-    ├── login_page.dart
-    ├── home_page.dart            # sesi + status notifikasi + lonceng badge
-    ├── notifications_page.dart   # daftar notifikasi belum dibaca
-    └── announcement_page.dart    # target deep link /pengumuman/:id
+├── main.dart                        # bootstrap Firebase + ProviderScope
+├── domain/                          # inti: tanpa Flutter, Firebase, atau Dio
+│   ├── constants.dart               # kCampusTopic
+│   ├── routes.dart                  # Routes + Routes.sanitize()
+│   ├── entities/
+│   │   ├── app_notification.dart    # entity notifikasi (murni)
+│   │   ├── auth_session.dart        # token + maskedAccess
+│   │   ├── notification_inbox.dart  # aturan dedupe + batas 50 entri
+│   │   └── push_registration.dart   # hasil pemasangan FCM yang bisa di-stop
+│   ├── errors/auth_exception.dart
+│   ├── repositories/                # kontrak (abstract interface class)
+│   │   ├── auth_repository.dart     # login / refresh / signOut
+│   │   ├── session_repository.dart  # baca / simpan / hapus sesi
+│   │   ├── device_repository.dart   # register / unregister token
+│   │   ├── notification_inbox_repository.dart
+│   │   ├── app_badge.dart
+│   │   └── push_messaging.dart      # prepare/token/stream/topik/banner
+│   ├── usecases/                    # satu kelas = satu aksi bisnis
+│   │   ├── auth/                    # login, restore, refresh, logout
+│   │   ├── notifications/           # load, add, markRead, markAllRead, badge
+│   │   └── push/                    # start, sendTest, setTopicSubscription
+│   └── utils/masking.dart           # maskSecret()
+├── data/                            # implementasi kontrak (SDK berhenti di sini)
+│   ├── datasources/key_value_store.dart
+│   ├── errors/                      # api_error_messages, firebase_auth_messages
+│   ├── http/api_client.dart         # Dio + interceptor 401 -> refresh -> retry
+│   ├── mappers/app_notification_mapper.dart
+│   ├── messaging/                   # fcm_mapper, fcm_push_messaging, bootstrap
+│   ├── platform/platform_name.dart
+│   └── repositories/                # secure session, firebase/mock auth,
+│                                    # http device, prefs inbox, launcher badge
+└── presentation/                    # state + UI
+    ├── pages/                       # login, home, notifications, announcement
+    ├── providers/
+    │   ├── dependencies.dart        # composition root (satu-satunya DI)
+    │   ├── app_router.dart          # GoRouter + guard
+    │   ├── auth/auth_controller.dart
+    │   ├── notifications/notification_controller.dart
+    │   └── push/push_controller.dart + push_state.dart
+    └── utils/relative_time.dart     # "5 mnt lalu"
 
 assets/
 ├── mixkit-digital-quick-tone-2866.wav   # sumber suara notifikasi
@@ -90,7 +108,19 @@ android/app/src/main/res/
 └── mipmap-*/ic_launcher.*               # hasil flutter_launcher_icons
 ```
 
-## Cara menjalankan
+## Pemetaan SOLID
+
+| Prinsip | Wujudnya di repo ini |
+|---|---|
+| **S**ingle Responsibility | `StartPushUseCase` hanya memasang FCM; `AddNotificationUseCase` hanya mencatat + badge; `NotificationInbox` hanya aturan dedupe/batas; `Routes` hanya path. Tidak ada lagi kelas "serba bisa" seperti `PushService` 295 baris |
+| **O**pen/Closed | Menambah penyimpanan kotak masuk (mis. SQLite) cukup membuat `NotificationInboxRepository` baru; use case dan UI tidak berubah |
+| **L**iskov Substitution | `signOut` dipindah ke `AuthRepository`, bukan interface tambahan yang diperiksa `is`. `MockAuthRepository` mengimplementasikan `signOut` sebagai no-op sehingga benar-benar bisa menggantikan `FirebaseAuthRepository` |
+| **I**nterface Segregation | `AppBadge` hanya `setCount`; `NotificationInboxRepository` hanya `readAll`/`writeAll`; `DeviceRepository` hanya `register`/`unregister` |
+| **D**ependency Inversion | Domain menetapkan `PushMessaging`, `SessionRepository`, dll.; `data/` mengimplementasikan; `presentation/providers/dependencies.dart` satu-satunya tempat memilih implementasi |
+
+Konsekuensi praktis: tidak ada berkas di `presentation/` yang meng-import
+`firebase_messaging`, `firebase_auth`, `flutter_secure_storage`, atau `dio`.
+
 
 ### 1. Prasyarat
 
@@ -187,7 +217,7 @@ Bukti status runtime (token terpotong, izin, topik):
 
 ```bash
 flutter analyze   # No issues found!
-flutter test      # All tests passed! (55 test)
+flutter test      # All tests passed! (62 test)
 flutter build apk --debug   # Built build/app/outputs/flutter-apk/app-debug.apk
 ```
 
@@ -195,9 +225,9 @@ flutter build apk --debug   # Built build/app/outputs/flutter-apk/app-debug.apk
 |---|---|
 | `test/auth_test.dart` | guard route, login valid/invalid, sesi setengah jadi dibersihkan, refresh sukses/gagal |
 | `test/api_client_test.dart` | 401 → refresh sekali → retry sukses (2 request); refresh mati → 1 request + sesi dibersihkan |
-| `test/payload_test.dart` | `routeFromMessage`, `idFromMessage`, `sanitizeRoute`, `maskSecret` |
-| `test/notification_test.dart` | model notifikasi, `NotificationStore` (dedupe/batas data rusak), `NotificationCenter` + badge, `relativeTime`, `authMessageFor`, dan widget test "notifikasi dibaca → hilang dari daftar" |
-| `test/push_test.dart` | `PushState.copyWith` (termasuk `null` yang mengosongkan `note`/`token`), `maskedToken`, `PushController.start`, dan `detach()` saat logout |
+| `test/payload_test.dart` | `routeFromMessage`, `idFromMessage`, `Routes.sanitize`, `maskSecret` |
+| `test/notification_test.dart` | entity + mapper `AppNotification`, aturan `NotificationInbox` (dedupe/batas), `SharedPrefsInboxRepository` (data rusak), `NotificationController` + badge, `relativeTime`, `authMessageFor`, dan widget test "notifikasi dibaca → hilang dari daftar" |
+| `test/push_test.dart` | `PushState.copyWith` (termasuk `null` yang mengosongkan `note`/`token`), `maskedToken`, `PushController.start`, token refresh → lapor ulang, `detach()` melepas listener, dan `start()` setelah login ulang |
 
 ## Keamanan
 
@@ -214,10 +244,10 @@ flutter build apk --debug   # Built build/app/outputs/flutter-apk/app-debug.apk
 
 - `kApiBaseUrl` masih domain contoh (`https://example-campus-api.test`), jadi
   `POST /devices` belum berhasil. Kontrak endpoint didokumentasikan di
-  `lib/data/device_repository.dart`.
+  `lib/data/repositories/http_device_repository.dart`.
 - Firebase menyimpan sesinya sendiri; perpanjangan token memakai
   `User.getIdToken(forceRefresh: true)`. Bila platform tidak mengekspos refresh
-  token, `TokenStore` menyimpan penanda `firebase:getIdToken` (bukan rahasia).
+  token, `SecureSessionRepository` menyimpan penanda `firebase:getIdToken` (bukan rahasia).
 - Angka badge pada ikon aplikasi bergantung pada launcher. Badge angka hanya bisa
   dipasang pada launcher yang didukung ShortcutBadger (Samsung, MIUI, Oppo, Vivo,
   Huawei/Honor, Sony, …); Pixel dan Infinix XOS hanya menampilkan titik dari

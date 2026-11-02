@@ -137,7 +137,7 @@ Aturan keras (melanggar berarti bug, bukan selera):
 1. Jangan menyimpan token di `SharedPreferences`, file, atau state yang
    dirender.
 2. Jangan mencetak token/payload penuh ke log.
-3. Jangan memakai `BuildContext` di `messaging/`.
+3. Jangan memakai `BuildContext` di `data/`.
 4. Jangan membuat `GoRouter` baru di dalam `build`.
 5. Jangan menambah `await` di `PushController.start()` sebelum
    `addPostFrameCallback` — urutannya sudah disengaja.
@@ -147,20 +147,20 @@ Aturan keras (melanggar berarti bug, bukan selera):
 ### 7.1 Mengganti base URL backend
 
 ```dart
-// lib/data/api_client.dart
+// lib/data/http/api_client.dart
 const String kApiBaseUrl = 'https://api.kampus.ac.id';
 ```
 
 Tidak ada perubahan lain. `apiClientProvider` otomatis memakai nilai baru, dan
-`DeviceRepository` mengikuti. Setelah backend hidup, `POST /devices` akan
+`HttpDeviceRepository` mengikuti. Setelah backend hidup, `POST /devices` akan
 membuat baris "Laporan token ke backend" berubah menjadi
 `POST /devices berhasil`.
 
 ### 7.2 Login Firebase Authentication (sudah terpasang)
 
 Implementasi produksi sudah ada di `FirebaseAuthRepository`
-(`lib/data/auth_repository.dart`). Yang perlu dilakukan hanya menyiapkan
-Firebase:
+(`lib/data/repositories/firebase_auth_repository.dart`). Yang perlu dilakukan
+hanya menyiapkan Firebase:
 
 1. Taruh `google-services.json` di `android/app/`.
 2. Firebase Console → **Authentication → Sign-in method → Email/Password**:
@@ -173,8 +173,8 @@ Bila langkah 1 belum dilakukan, aplikasi tetap jalan dengan
 `MockAuthRepository` (email mengandung `@`, sandi ≥ 6 karakter).
 
 Bentuk `AuthSession` sengaja dibuat menyerupai respons Firebase Auth, sehingga
-`AuthNotifier`, `TokenStore`, `api_client.dart`, router, dan seluruh UI tidak
-perlu berubah saat sumber auth diganti.
+`AuthController`, `SessionRepository`, `api_client.dart`, router, dan seluruh UI
+tidak perlu berubah saat sumber auth diganti.
 
 Catatan: `refresh()` memakai `user.getIdToken(true)` dan mengabaikan argumen
 `refreshToken` karena Firebase menyimpan sesinya sendiri. Bila kelak backend
@@ -183,13 +183,13 @@ memutar refresh token, sesuaikan `save(...)` di `api_client.dart` (lihat
 
 ### 7.3 Menambah layar baru
 
-1. Tambahkan path di `lib/routes.dart`:
+1. Tambahkan path di `lib/domain/routes.dart`:
 
    ```dart
    static const String profile = '/profil';
    ```
 
-2. Buat halaman di `lib/pages/profile_page.dart`.
+2. Buat halaman di `lib/presentation/pages/profile_page.dart`.
 3. Daftarkan di `app_router.dart`:
 
    ```dart
@@ -208,26 +208,27 @@ memutar refresh token, sesuaikan `save(...)` di `api_client.dart` (lihat
 2. Daftarkan `GoRoute`-nya.
 3. Kirim `data.route` yang sesuai dari backend/Console.
 4. Bila butuh parsing khusus, tambahkan fungsi murni di
-   `lib/messaging/payload.dart` dan tulis test-nya lebih dulu.
+   `lib/data/messaging/fcm_mapper.dart` dan tulis test-nya lebih dulu.
 
-Tidak perlu mengubah `PushService`: ia hanya meneruskan string rute.
+Tidak perlu mengubah `FcmPushMessaging`: ia hanya meneruskan string rute.
 
 ### 7.5 Menambah topik notifikasi
 
 ```dart
-// lib/messaging/push_service.dart
+// lib/domain/constants.dart
 const String kCampusTopic = 'pengumuman-kampus';
 const String kGradesTopic = 'nilai-mahasiswa';
 ```
 
-Tambahkan `subscribeGradesTopic()` mengikuti pola yang ada, panggil dari
-`PushController.start()`, dan tampilkan statusnya di `PushState` bila perlu
-bukti. Jangan lupa membuat channel terpisah bila importance-nya berbeda.
+Tambahkan method di `PushMessaging` (`subscribeTopic` sudah cukup umum), panggil
+lewat `SetTopicSubscriptionUseCase`, dan tampilkan statusnya di `PushState` bila
+perlu bukti. Jangan lupa membuat channel terpisah bila importance-nya berbeda.
 
 ### 7.6 Mengubah saluran/kanal notifikasi
 
-`kAnnouncementChannel` (`id: 'pengumuman_v2'`) dipakai di dua tempat: pembuatan
-channel dan `showLocalNotification`. Bila `id` berubah, sesuaikan pula
+`kAnnouncementChannel` (`id: 'pengumuman_v2'`, di
+`lib/data/messaging/fcm_push_messaging.dart`) dipakai di dua tempat: pembuatan
+channel dan `showBanner`. Bila `id` berubah, sesuaikan pula
 `android.notification.channel_id` pada payload yang dikirim backend
 (`tools/send_fcm.py` → `CHANNEL_ID`).
 
@@ -244,7 +245,7 @@ channel itu. Kalau perlu mengubah suara, buat `id` baru (mis.
    Nama berkas di `res/raw` harus **huruf kecil, tanpa tanda hubung**, dan tanpa
    ekstensi pada rujukannya.
 3. Bila nama resource berubah, sesuaikan
-   `kNotificationSoundResource` di `lib/messaging/push_service.dart`.
+   `kNotificationSoundResource` di `lib/data/messaging/fcm_push_messaging.dart`.
 4. Karena channel lama tidak bisa diubah, ganti id channel (lihat 7.6) dan
    perbarui `CHANNEL_ID` di `tools/send_fcm.py`.
 5. `flutter run`, lalu pakai tombol **"Tampilkan notifikasi uji"** di beranda
@@ -272,15 +273,16 @@ perangkat agar launcher memuat ulang ikon.
 
 ### 7.9 Mengubah perilaku kotak masuk notifikasi
 
-Semua perilaku "dibaca" terpusat di `NotificationCenter`
-(`lib/providers/notification_providers.dart`):
+Semua perilaku "dibaca" terpusat di use case
+(`lib/domain/usecases/notifications/`), dengan aturan murni di
+`lib/domain/entities/notification_inbox.dart`:
 
 | Ingin | Ubah |
 |---|---|
 | Entri tetap tampil setelah dibaca | Tambahkan field `read` pada `AppNotification` dan filter di halaman |
-| Batas jumlah entri | `NotificationStore.maxEntries` |
-| Menyimpan arsip terpisah | Tambahkan kunci kedua di `NotificationStore` |
-| Angka badge berbeda dari jumlah entri | Ubah `NotificationCenter._syncBadge()` |
+| Batas jumlah entri | `NotificationInbox.maxEntries` |
+| Menyimpan arsip terpisah | Tambahkan kunci kedua di `SharedPrefsInboxRepository` |
+| Angka badge berbeda dari jumlah entri | Ubah `SyncBadgeUseCase` (dipanggil use case lain) |
 
 Jangan menambah penghitung badge sendiri: angka badge selalu
 `state.length` agar tidak ada dua sumber kebenaran.
@@ -291,22 +293,27 @@ Tiga jenis test yang sudah ada, dan kapan memakai masing-masing:
 
 | Jenis | Cocok untuk | Contoh |
 |---|---|---|
-| Test murni | Parsing payload, masking, aturan route | `test/payload_test.dart` |
-| Test unit dengan fake dependency | Interceptor Dio, notifier auth | `test/api_client_test.dart`, `test/auth_test.dart` |
-| Widget test | Guard route, alur login, render status | `test/auth_test.dart` |
+| Test murni | Parsing payload, masking, aturan route, aturan `NotificationInbox` | `test/payload_test.dart`, `test/notification_test.dart` |
+| Test unit dengan fake dependency | Interceptor Dio, `AuthController`, `PushController` | `test/api_client_test.dart`, `test/auth_test.dart`, `test/push_test.dart` |
+| Widget test | Guard route, alur login, render status | `test/auth_test.dart`, `test/notification_test.dart` |
 
-### 8.1 Menyuntikkan `TokenStore` palsu
+### 8.1 Menyuntikkan `SessionRepository` palsu
 
-`TokenStore` punya konstruktor opsional `storage`, tetapi cara yang dipakai
-proyek ini adalah **subclass** dan override method-nya:
+`SecureSessionRepository` punya konstruktor opsional `storage`, tetapi cara yang
+dipakai proyek ini adalah **implementasi interface** — cukup tiga method, tanpa
+menyentuh secure storage maupun plugin apa pun:
 
 ```dart
-class FakeTokenStore extends TokenStore {
+class FakeSessionRepository implements SessionRepository {
   String? access;
   int clearCount = 0;
 
   @override
-  Future<String?> readAccess() async => access;
+  Future<AuthSession?> read() async =>
+      access == null ? null : AuthSession(access: access!, refresh: 'r');
+
+  @override
+  Future<void> save(AuthSession session) async => access = session.access;
 
   @override
   Future<void> clear() async {
@@ -320,12 +327,16 @@ Lalu suntikkan lewat `ProviderScope`/`ProviderContainer`:
 
 ```dart
 ProviderScope(
-  overrides: [tokenStoreProvider.overrideWithValue(FakeTokenStore())],
+  overrides: [sessionRepositoryProvider.overrideWithValue(FakeSessionRepository())],
   child: const CampusNotifyApp(
     firebase: FirebaseBootstrap.notConfigured('test'),
   ),
 );
 ```
+
+Pola yang sama dipakai untuk `PushMessaging` (`FakePushMessaging`), `AppBadge`
+(`RecordingBadge`), `DeviceRepository` (`FakeDeviceRepository`), dan
+`NotificationInboxRepository` (lewat `InMemoryKeyValueStore`).
 
 ### 8.2 Menguji HTTP tanpa jaringan
 
@@ -333,7 +344,7 @@ Gunakan `ScriptedAdapter` sebagai `httpClientAdapter`:
 
 ```dart
 final dio = buildApiClient(
-  store: store,
+  sessions: store,
   auth: _RenewingRepository('access-baru'),
   onSessionExpired: () async => sessionExpiredCalls++,
 )..httpClientAdapter = ScriptedAdapter(validToken: 'access-baru');

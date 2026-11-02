@@ -1,7 +1,6 @@
-import 'package:campusnotif/data/masking.dart';
-import 'package:campusnotif/messaging/payload.dart';
-import 'package:campusnotif/messaging/push_service.dart';
-import 'package:campusnotif/routes.dart';
+import 'package:campusnotif/data/messaging/fcm_mapper.dart';
+import 'package:campusnotif/domain/routes.dart';
+import 'package:campusnotif/domain/utils/masking.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -59,17 +58,14 @@ void main() {
     });
   });
 
-  group('sanitizeRoute', () {
+  group('Routes.sanitize', () {
     test('null / kosong menjadi beranda', () {
-      expect(PushService.sanitizeRoute(null), Routes.home);
-      expect(PushService.sanitizeRoute(''), Routes.home);
+      expect(Routes.sanitize(null), Routes.home);
+      expect(Routes.sanitize(''), Routes.home);
     });
 
     test('garis miring ditambahkan bila hilang', () {
-      expect(
-        PushService.sanitizeRoute('pengumuman/3'),
-        '/pengumuman/3',
-      );
+      expect(Routes.sanitize('pengumuman/3'), '/pengumuman/3');
     });
   });
 

@@ -1,227 +1,331 @@
-import 'package:campusnotif/data/device_repository.dart';
-import 'package:campusnotif/data/notification_store.dart';
-import 'package:campusnotif/messaging/push_service.dart';
-import 'package:campusnotif/providers/notification_providers.dart';
-import 'package:campusnotif/providers/push_providers.dart';
-import 'package:dio/dio.dart';
+import 'dart:async';
+
+import 'package:campusnotif/data/datasources/key_value_store.dart';
+import 'package:campusnotif/domain/entities/app_notification.dart';
+import 'package:campusnotif/domain/repositories/device_repository.dart';
+import 'package:campusnotif/domain/repositories/push_messaging.dart';
+import 'package:campusnotif/presentation/providers/dependencies.dart';
+import 'package:campusnotif/presentation/providers/notifications/notification_controller.dart';
+import 'package:campusnotif/presentation/providers/push/push_controller.dart';
+import 'package:campusnotif/presentation/providers/push/push_state.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// `PushService` palsu: tidak menyentuh Firebase maupun plugin notifikasi.
-///
-/// `super()` aman karena `_messaging` diselesaikan malas di [PushService], jadi
-/// `FirebaseMessaging.instance` (yang memanggil `Firebase.app()`) tidak pernah
-/// disentuh saat objek dibuat.
-class FakePushService extends PushService {
-  /// Callback terakhir yang dipasang `start()`, dipakai test untuk meniru
-  /// `onTokenRefresh` yang datang belakangan.
-  Future<void> Function(String token)? onToken;
+/// Pengganti FCM: seluruh kejadian (token, pesan, ketukan) dipicu manual dari
+/// test, tanpa plugin atau platform channel.
+class FakePushMessaging implements PushMessaging {
+  final StreamController<String> tokenController =
+      StreamController<String>.broadcast();
+  final StreamController<AppNotification> foreground =
+      StreamController<AppNotification>.broadcast();
+  final StreamController<AppNotification> opened =
+      StreamController<AppNotification>.broadcast();
+  final StreamController<String> taps = StreamController<String>.broadcast();
 
+  final List<AppNotification> banners = <AppNotification>[];
+  int prepareCount = 0;
   int subscribeCount = 0;
   int unsubscribeCount = 0;
+  bool permissionGranted = true;
+  String? token = 'token-uji';
 
   @override
-  Future<void> initLocalNotifications() async {}
+  Future<void> prepare() async => prepareCount++;
 
   @override
-  Future<bool> requestPermission() async => true;
+  Future<bool> requestPermission() async => permissionGranted;
 
   @override
-  Future<void> initFcmToken({
-    required Future<void> Function(String token) onToken,
-  }) async {
-    this.onToken = onToken;
-    await onToken('fcm-token-uji');
+  Future<String?> currentToken() async => token;
+
+  @override
+  Stream<String> get tokenRefresh => tokenController.stream;
+
+  @override
+  Stream<AppNotification> get foregroundMessages => foreground.stream;
+
+  @override
+  Stream<AppNotification> get openedMessages => opened.stream;
+
+  @override
+  Stream<String> get bannerTaps => taps.stream;
+
+  @override
+  Future<AppNotification?> initialMessage() async => null;
+
+  @override
+  Future<void> subscribeTopic(String topic) async => subscribeCount++;
+
+  @override
+  Future<void> unsubscribeTopic(String topic) async => unsubscribeCount++;
+
+  @override
+  Future<void> showBanner(AppNotification notification) async =>
+      banners.add(notification);
+
+  Future<void> close() async {
+    await tokenController.close();
+    await foreground.close();
+    await opened.close();
+    await taps.close();
   }
-
-  @override
-  Future<void> subscribeCampusTopic() async => subscribeCount++;
-
-  @override
-  Future<void> unsubscribeCampusTopic() async => unsubscribeCount++;
-
-  @override
-  Future<void> listenMessages({
-    required void Function(String route) onRoute,
-    required Future<void> Function(AppNotification notification) onNotification,
-    required Future<void> Function(String? messageId, String route) onOpened,
-  }) async {}
-
-  @override
-  Future<void> showLocalNotification({
-    required String title,
-    required String body,
-    required String route,
-  }) async {}
 }
 
-/// `DeviceRepository` palsu yang merekam token tanpa jaringan.
-class FakeDeviceRepository extends DeviceRepository {
-  FakeDeviceRepository() : super(Dio());
+/// Pengganti backend `POST/DELETE /devices`.
+class FakeDeviceRepository implements DeviceRepository {
+  FakeDeviceRepository({this.acceptRegistration = true});
 
-  bool registerResult = true;
+  bool acceptRegistration;
   final List<String> registered = <String>[];
   final List<String> unregistered = <String>[];
 
   @override
-  Future<bool> registerDevice({
-    required String token,
-    required String platform,
-  }) async {
+  Future<bool> register({required String token}) async {
     registered.add(token);
-    return registerResult;
+    return acceptRegistration;
   }
 
   @override
-  Future<bool> unregisterDevice({required String token}) async {
+  Future<bool> unregister({required String token}) async {
     unregistered.add(token);
     return true;
   }
 }
 
+ProviderContainer _container({
+  required FakePushMessaging push,
+  FakeDeviceRepository? devices,
+}) {
+  final ProviderContainer container = ProviderContainer(
+    overrides: [
+      pushMessagingProvider.overrideWithValue(push),
+      deviceRepositoryProvider
+          .overrideWithValue(devices ?? FakeDeviceRepository()),
+      keyValueStoreProvider.overrideWithValue(InMemoryKeyValueStore()),
+    ],
+  );
+  addTearDown(container.dispose);
+  return container;
+}
+
 void main() {
   group('PushState.copyWith', () {
-    const PushState penuh = PushState(
-      started: true,
-      permissionGranted: true,
-      token: 'token-panjang-sekali-1234',
-      registeredOnBackend: true,
-      subscribedTopic: true,
-      lastRoute: '/pengumuman/9',
-      note: 'catatan lama',
-    );
-
-    test('tanpa argumen mempertahankan seluruh nilai', () {
-      final PushState hasil = penuh.copyWith();
-
-      expect(hasil.started, isTrue);
-      expect(hasil.permissionGranted, isTrue);
-      expect(hasil.token, penuh.token);
-      expect(hasil.registeredOnBackend, isTrue);
-      expect(hasil.subscribedTopic, isTrue);
-      expect(hasil.lastRoute, '/pengumuman/9');
-      expect(hasil.note, 'catatan lama');
-    });
-
-    test('null mengosongkan note, bukan mempertahankannya', () {
-      final PushState hasil = penuh.copyWith(note: null);
-
-      expect(hasil.note, isNull);
-      expect(hasil.token, penuh.token, reason: 'field lain tidak berubah');
-      expect(hasil.lastRoute, '/pengumuman/9');
-    });
-
-    test('null mengosongkan token dan lastRoute', () {
-      final PushState hasil = penuh.copyWith(token: null, lastRoute: null);
-
-      expect(hasil.token, isNull);
-      expect(hasil.lastRoute, isNull);
-      expect(hasil.note, 'catatan lama');
-    });
-
-    test('nilai baru menggantikan nilai lama', () {
-      final PushState hasil = penuh.copyWith(
-        note: 'catatan baru',
-        subscribedTopic: false,
+    test('tanpa argumen, seluruh nilai dipertahankan', () {
+      const PushState state = PushState(
+        started: true,
+        permissionGranted: true,
+        token: 'token-uji',
+        registeredOnBackend: true,
+        subscribedTopic: true,
+        lastRoute: '/pengumuman/3',
+        note: 'catatan',
       );
 
-      expect(hasil.note, 'catatan baru');
-      expect(hasil.subscribedTopic, isFalse);
+      final PushState copy = state.copyWith();
+
+      expect(copy.started, isTrue);
+      expect(copy.token, 'token-uji');
+      expect(copy.lastRoute, '/pengumuman/3');
+      expect(copy.note, 'catatan');
+    });
+
+    test('null pada token mengosongkan token lama', () {
+      const PushState state = PushState(token: 'token-uji');
+
+      final PushState copy = state.copyWith(token: null);
+
+      expect(copy.token, isNull);
+      expect(copy.maskedToken, '-');
+    });
+
+    test('null pada note mengosongkan catatan lama (regresi)', () {
+      // Bug lama: copyWith(note: null) dianggap "tidak diisi" sehingga catatan
+      // error tetap tampil walau masalahnya sudah hilang.
+      const PushState state = PushState(note: 'FCM gagal disiapkan');
+
+      expect(state.copyWith(note: null).note, isNull);
+      expect(state.copyWith().note, 'FCM gagal disiapkan');
+    });
+
+    test('null pada lastRoute mengosongkan rute terakhir', () {
+      const PushState state = PushState(lastRoute: '/pengumuman/9');
+
+      expect(state.copyWith(lastRoute: null).lastRoute, isNull);
     });
 
     test('maskedToken tidak membocorkan token utuh', () {
-      expect(penuh.maskedToken, isNot(penuh.token));
-      expect(penuh.maskedToken, contains('••••'));
-      expect(const PushState().maskedToken, '-', reason: 'belum ada token');
+      const PushState state = PushState(token: 'abcdefghijklmnopqrstuvwxyz');
+
+      expect(state.maskedToken, isNot(contains('mnop')));
+      expect(state.maskedToken, contains('••••'));
     });
   });
 
   group('PushController', () {
-    late ProviderContainer container;
-    late FakePushService service;
-    late FakeDeviceRepository devices;
+    test('start menyiapkan kanal, mendaftarkan token, dan berlangganan topik',
+        () async {
+      final FakePushMessaging push = FakePushMessaging();
+      addTearDown(push.close);
+      final FakeDeviceRepository devices = FakeDeviceRepository();
+      final ProviderContainer container =
+          _container(push: push, devices: devices);
 
-    setUp(() {
-      service = FakePushService();
-      devices = FakeDeviceRepository();
-      container = ProviderContainer(
-        overrides: [
-          pushServiceProvider.overrideWithValue(service),
-          deviceRepositoryProvider.overrideWithValue(devices),
-          // Tanpa ini kotak masuk menyentuh shared_preferences.
-          keyValueStoreProvider.overrideWithValue(InMemoryKeyValueStore()),
-        ],
-      );
-      addTearDown(container.dispose);
-    });
-
-    test('start melaporkan token dan berlangganan topik', () async {
-      final PushController push = container.read(pushProvider.notifier);
-
-      await push.start(firebaseReady: true);
-
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
       final PushState state = container.read(pushProvider);
-      expect(devices.registered, <String>['fcm-token-uji']);
-      expect(state.token, 'fcm-token-uji');
+
+      expect(push.prepareCount, 1, reason: 'kanal dibuat sebelum pesan datang');
+      expect(devices.registered, <String>['token-uji']);
+      expect(push.subscribeCount, 1);
+      expect(state.started, isTrue);
+      expect(state.token, 'token-uji');
       expect(state.permissionGranted, isTrue);
-      expect(state.subscribedTopic, isTrue);
-      expect(service.subscribeCount, 1);
       expect(state.registeredOnBackend, isTrue);
+      expect(state.subscribedTopic, isTrue);
       expect(state.note, isNull);
     });
 
-    test('catatan error hilang setelah pelaporan token berhasil', () async {
-      devices.registerResult = false;
-      final PushController push = container.read(pushProvider.notifier);
-      await push.start(firebaseReady: true);
+    test('token baru dari FCM dilaporkan ulang ke backend', () async {
+      final FakePushMessaging push = FakePushMessaging();
+      addTearDown(push.close);
+      final FakeDeviceRepository devices = FakeDeviceRepository();
+      final ProviderContainer container =
+          _container(push: push, devices: devices);
 
-      expect(
-        container.read(pushProvider).note,
-        isNotNull,
-        reason: 'POST /devices gagal harus dilaporkan',
-      );
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
 
-      // Token berubah (mis. lewat onTokenRefresh) dan laporan diterima.
-      devices.registerResult = true;
-      await service.onToken!('fcm-token-baru');
+      push.tokenController.add('token-baru');
+      for (int i = 0; i < 50 && devices.registered.length < 2; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
 
-      final PushState state = container.read(pushProvider);
-      expect(state.token, 'fcm-token-baru');
-      expect(state.registeredOnBackend, isTrue);
-      expect(
-        state.note,
-        isNull,
-        reason: 'catatan lama harus bisa dikosongkan lewat copyWith',
-      );
+      expect(devices.registered, <String>['token-uji', 'token-baru']);
     });
 
-    test('detach melepas perangkat, topik, dan mengosongkan status', () async {
-      final PushController push = container.read(pushProvider.notifier);
-      await push.start(firebaseReady: true);
+    test('catatan muncul bila backend belum menerima token', () async {
+      final FakePushMessaging push = FakePushMessaging();
+      addTearDown(push.close);
+      final ProviderContainer container = _container(
+        push: push,
+        devices: FakeDeviceRepository(acceptRegistration: false),
+      );
 
-      await push.detach();
-
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
       final PushState state = container.read(pushProvider);
-      expect(devices.unregistered, <String>['fcm-token-uji']);
-      expect(service.unsubscribeCount, 1);
+
+      expect(state.registeredOnBackend, isFalse);
+      expect(state.note, contains('POST /devices'));
+      expect(state.token, 'token-uji', reason: 'token tetap ada di perangkat');
+    });
+
+    test('izin ditolak menghasilkan catatan, bukan kegagalan senyap', () async {
+      final FakePushMessaging push = FakePushMessaging()
+        ..permissionGranted = false;
+      addTearDown(push.close);
+      final ProviderContainer container = _container(push: push);
+
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
+
+      expect(container.read(pushProvider).permissionGranted, isFalse);
+      expect(container.read(pushProvider).note, contains('Izin notifikasi'));
+    });
+
+    test('tanpa Firebase, start hanya menulis catatan dan tidak menyentuh FCM',
+        () async {
+      final FakePushMessaging push = FakePushMessaging();
+      addTearDown(push.close);
+      final ProviderContainer container = _container(push: push);
+
+      await container
+          .read(pushProvider.notifier)
+          .start(firebaseReady: false, firebaseNote: 'Firebase belum siap');
+
+      expect(container.read(pushProvider).started, isFalse);
+      expect(container.read(pushProvider).note, 'Firebase belum siap');
+      expect(push.prepareCount, 0);
+    });
+
+    test('pesan foreground masuk ke kotak masuk dan memunculkan banner',
+        () async {
+      final FakePushMessaging push = FakePushMessaging();
+      addTearDown(push.close);
+      final ProviderContainer container = _container(push: push);
+
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
+
+      push.foreground.add(
+        AppNotification.create(
+          messageId: 'm1',
+          title: 'Jadwal berubah',
+          body: 'Pindah ruang',
+          route: '/pengumuman/1',
+        ),
+      );
+
+      for (int i = 0;
+          i < 50 && container.read(notificationsProvider).isEmpty;
+          i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+
+      expect(container.read(notificationsProvider).single.id, 'm1');
+      expect(push.banners.length, 1);
+    });
+
+    test('detach menghentikan langganan topik dan mengosongkan state', () async {
+      final FakePushMessaging push = FakePushMessaging();
+      addTearDown(push.close);
+      final ProviderContainer container = _container(push: push);
+
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
+      await container.read(pushProvider.notifier).detach();
+      final PushState state = container.read(pushProvider);
+
+      expect(push.unsubscribeCount, 1);
+      expect(state.started, isFalse);
       expect(state.token, isNull);
       expect(state.registeredOnBackend, isFalse);
       expect(state.subscribedTopic, isFalse);
       expect(state.note, isNull);
-      expect(
-        state.started,
-        isFalse,
-        reason: 'start() harus bisa memasang FCM lagi setelah login ulang',
-      );
     });
 
-    test('detach tanpa token tidak memanggil backend', () async {
-      final PushController push = container.read(pushProvider.notifier);
+    test('setelah detach, pesan foreground tidak lagi dicatat', () async {
+      final FakePushMessaging push = FakePushMessaging();
+      addTearDown(push.close);
+      final ProviderContainer container = _container(push: push);
 
-      await push.detach();
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
+      await container.read(pushProvider.notifier).detach();
 
-      expect(devices.unregistered, isEmpty);
-      expect(service.unsubscribeCount, 0);
+      push.foreground.add(
+        AppNotification.create(
+          messageId: 'm2',
+          title: 'Setelah logout',
+          body: 'Tidak boleh masuk',
+          route: '/pengumuman/2',
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(container.read(notificationsProvider), isEmpty);
+      expect(push.banners, isEmpty);
+    });
+
+    test('start berulang tidak memasang listener ganda, tetapi boleh setelah '
+        'detach', () async {
+      final FakePushMessaging push = FakePushMessaging();
+      addTearDown(push.close);
+      final ProviderContainer container = _container(push: push);
+
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
+      expect(push.prepareCount, 1, reason: 'panggilan kedua diabaikan');
+
+      await container.read(pushProvider.notifier).detach();
+      await container.read(pushProvider.notifier).start(firebaseReady: true);
+
+      expect(push.prepareCount, 2, reason: 'login berikutnya memasang ulang');
+      expect(push.subscribeCount, 2);
+      expect(container.read(pushProvider).started, isTrue);
     });
   });
 }

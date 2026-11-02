@@ -1,202 +1,222 @@
-import 'package:campusnotif/data/auth_repository.dart';
-import 'package:campusnotif/data/badge_service.dart';
-import 'package:campusnotif/data/notification_store.dart';
-import 'package:campusnotif/data/relative_time.dart';
-import 'package:campusnotif/data/token_store.dart';
+import 'package:campusnotif/data/datasources/key_value_store.dart';
+import 'package:campusnotif/data/errors/firebase_auth_messages.dart';
+import 'package:campusnotif/data/mappers/app_notification_mapper.dart';
+import 'package:campusnotif/data/messaging/firebase_bootstrap.dart';
+import 'package:campusnotif/data/repositories/shared_prefs_inbox_repository.dart';
+import 'package:campusnotif/domain/entities/app_notification.dart';
+import 'package:campusnotif/domain/entities/auth_session.dart';
+import 'package:campusnotif/domain/entities/notification_inbox.dart';
+import 'package:campusnotif/domain/repositories/app_badge.dart';
+import 'package:campusnotif/domain/repositories/session_repository.dart';
 import 'package:campusnotif/main.dart';
-import 'package:campusnotif/messaging/firebase_bootstrap.dart';
-import 'package:campusnotif/providers/auth_provider.dart';
-import 'package:campusnotif/providers/notification_providers.dart';
+import 'package:campusnotif/presentation/providers/dependencies.dart';
+import 'package:campusnotif/presentation/providers/notifications/notification_controller.dart';
+import 'package:campusnotif/presentation/utils/relative_time.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Token store di memori supaya test tidak menyentuh secure storage.
-class FakeTokenStore extends TokenStore {
-  FakeTokenStore({this.access, this.refresh, this.email});
-
-  String? access;
-  String? refresh;
-  String? email;
-
-  @override
-  Future<String?> readAccess() async => access;
-
-  @override
-  Future<String?> readRefresh() async => refresh;
-
-  @override
-  Future<String?> readEmail() async => email;
-
-  @override
-  Future<void> save({
-    required String access,
-    required String refresh,
-    String? email,
-  }) async {
-    this.access = access;
-    this.refresh = refresh;
-    if (email != null) this.email = email;
-  }
-
-  @override
-  Future<bool> hasSession() async => access != null;
-
-  @override
-  Future<void> clear() async {
-    access = null;
-    refresh = null;
-    email = null;
-  }
-}
-
-/// Mencatat angka badge yang diminta, tanpa platform channel.
-class RecordingBadgeService extends BadgeService {
-  RecordingBadgeService();
-
-  final List<int> counts = <int>[];
-
-  @override
-  Future<void> setCount(int count) async => counts.add(count);
-}
-
-AppNotification _item(String id) => AppNotification.fromMessage(
+AppNotification _item(String id) => AppNotification.create(
       messageId: id,
       title: 'Judul $id',
       body: 'Isi $id',
       route: '/pengumuman/$id',
     );
 
+/// Badge palsu: mencatat setiap angka yang dipasang.
+class RecordingBadge implements AppBadge {
+  final List<int> counts = <int>[];
+
+  @override
+  Future<void> setCount(int count) async => counts.add(count);
+}
+
+class FakeSessionRepository implements SessionRepository {
+  FakeSessionRepository({this.access, this.refresh, this.email});
+
+  String? access;
+  String? refresh;
+  String? email;
+
+  @override
+  Future<AuthSession?> read() async {
+    if (access == null) return null;
+    return AuthSession(access: access!, refresh: refresh ?? '', email: email);
+  }
+
+  @override
+  Future<void> save(AuthSession session) async {
+    access = session.access;
+    refresh = session.refresh;
+  }
+
+  @override
+  Future<void> clear() async {
+    access = null;
+    refresh = null;
+  }
+}
+
 void main() {
   group('AppNotification', () {
-    test('id memakai messageId bila tersedia', () {
-      expect(_item('m1').id, 'm1');
-    });
-
-    test('id dibuat dari waktu + rute bila messageId kosong', () {
-      final AppNotification item = AppNotification.fromMessage(
-        messageId: '   ',
-        title: 'A',
-        body: 'B',
-        route: '/pengumuman/3',
-        receivedAt: DateTime(2026, 1, 2, 3, 4, 5),
+    test('id diambil dari messageId bila ada', () {
+      final AppNotification item = AppNotification.create(
+        messageId: 'm1',
+        title: 'Judul',
+        body: 'Isi',
+        route: '/pengumuman/1',
       );
 
-      expect(item.id, contains('/pengumuman/3'));
+      expect(item.id, 'm1');
+      expect(item.title, 'Judul');
+      expect(item.route, '/pengumuman/1');
+    });
+
+    test('tanpa messageId, id dibentuk dari waktu + rute', () {
+      final AppNotification item = AppNotification.create(
+        title: 'Judul',
+        body: 'Isi',
+        route: '/pengumuman/2',
+        receivedAt: DateTime(2026, 11, 2, 10),
+      );
+
+      expect(item.id, contains('/pengumuman/2'));
       expect(item.id, isNot(isEmpty));
     });
 
-    test('judul kosong diganti "Pengumuman"', () {
-      final AppNotification item = AppNotification.fromMessage(
-        title: '  ',
-        body: '',
-        route: '/',
+    test('judul kosong memakai judul pengganti', () {
+      final AppNotification item = AppNotification.create(
+        title: '   ',
+        body: 'Isi',
+        route: '/pengumuman/3',
       );
 
-      expect(item.title, 'Pengumuman');
+      expect(item.title, AppNotification.fallbackTitle);
     });
 
-    test('json bolak-balik menjaga isi', () {
-      final AppNotification asli = AppNotification.fromMessage(
-        messageId: 'm9',
-        title: 'Jadwal berubah',
-        body: 'Ruang A2',
-        route: '/pengumuman/9',
-        receivedAt: DateTime(2026, 3, 4, 5, 6, 7),
+    test('judul dan isi dipangkas spasi tepinya', () {
+      final AppNotification item = AppNotification.create(
+        title: '  Judul  ',
+        body: '  Isi  ',
+        route: '/pengumuman/4',
       );
 
-      final AppNotification? hasil =
-          AppNotification.fromJson(asli.toJson());
-
-      expect(hasil, isNotNull);
-      expect(hasil!.id, 'm9');
-      expect(hasil.title, 'Jadwal berubah');
-      expect(hasil.route, '/pengumuman/9');
-      expect(hasil.receivedAt, asli.receivedAt);
+      expect(item.title, 'Judul');
+      expect(item.body, 'Isi');
     });
 
-    test('json tanpa id/rute diabaikan', () {
-      expect(AppNotification.fromJson(<String, dynamic>{}), isNull);
-      expect(
-        AppNotification.fromJson(<String, dynamic>{'id': 'x'}),
-        isNull,
-      );
+    test('serialisasi bolak-balik mempertahankan isi', () {
+      final AppNotification item = _item('m9');
+      final AppNotification? restored =
+          appNotificationFromJson(appNotificationToJson(item));
+
+      expect(restored, isNotNull);
+      expect(restored!.id, item.id);
+      expect(restored.title, item.title);
+      expect(restored.body, item.body);
+      expect(restored.route, item.route);
+      expect(restored.receivedAt, item.receivedAt);
     });
   });
 
-  group('NotificationStore', () {
-    test('append menaruh entri terbaru di depan', () async {
-      final store = NotificationStore(InMemoryKeyValueStore());
+  group('NotificationInbox', () {
+    test('entri baru masuk di urutan teratas', () {
+      final List<AppNotification> next =
+          NotificationInbox.withAdded(<AppNotification>[_item('lama')], _item('baru'));
 
-      await store.append(_item('m1'));
-      final List<AppNotification> items = await store.append(_item('m2'));
-
-      expect(items.map((AppNotification e) => e.id).toList(), <String>['m2', 'm1']);
+      expect(next.map((AppNotification e) => e.id), <String>['baru', 'lama']);
     });
 
-    test('append dengan id sama tidak menduplikasi', () async {
-      final store = NotificationStore(InMemoryKeyValueStore());
+    test('id yang sama diganti, bukan diduplikasi', () {
+      final List<AppNotification> next = NotificationInbox.withAdded(
+        <AppNotification>[_item('m1'), _item('m2')],
+        _item('m2'),
+      );
 
-      await store.append(_item('m1'));
-      final List<AppNotification> items = await store.append(_item('m1'));
-
-      expect(items.length, 1);
+      expect(next.length, 2);
+      expect(next.first.id, 'm2');
     });
 
-    test('remove membuat notifikasi yang dibaca hilang', () async {
-      final store = NotificationStore(InMemoryKeyValueStore());
-      await store.append(_item('m1'));
-      await store.append(_item('m2'));
+    test('without menghapus satu entri', () {
+      final List<AppNotification> next = NotificationInbox.without(
+        <AppNotification>[_item('m1'), _item('m2')],
+        'm1',
+      );
 
-      final List<AppNotification> items = await store.remove('m2');
-
-      expect(items.length, 1);
-      expect(items.single.id, 'm1');
-      // Perubahan ikut tersimpan.
-      expect((await store.load()).single.id, 'm1');
+      expect(next.map((AppNotification e) => e.id), <String>['m2']);
     });
 
-    test('clear mengosongkan kotak masuk', () async {
-      final store = NotificationStore(InMemoryKeyValueStore());
-      await store.append(_item('m1'));
+    test('jumlah entri dibatasi maxEntries', () {
+      List<AppNotification> items = <AppNotification>[];
+      for (int i = 0; i < NotificationInbox.maxEntries + 5; i++) {
+        items = NotificationInbox.withAdded(items, _item('m$i'));
+      }
 
-      expect(await store.clear(), isEmpty);
-      expect(await store.load(), isEmpty);
+      expect(items.length, NotificationInbox.maxEntries);
+      expect(items.first.id, 'm${NotificationInbox.maxEntries + 4}');
+    });
+  });
+
+  group('SharedPrefsInboxRepository', () {
+    test('belum ada data -> daftar kosong', () async {
+      final SharedPrefsInboxRepository repo =
+          SharedPrefsInboxRepository(store: InMemoryKeyValueStore());
+
+      expect(await repo.readAll(), isEmpty);
     });
 
-    test('data rusak tidak membuat crash', () async {
-      final store = NotificationStore(
-        InMemoryKeyValueStore(<String, String>{
-          NotificationStore.storageKey: 'bukan json',
+    test('writeAll lalu readAll mengembalikan entri yang sama', () async {
+      final SharedPrefsInboxRepository repo =
+          SharedPrefsInboxRepository(store: InMemoryKeyValueStore());
+
+      await repo.writeAll(<AppNotification>[_item('m1'), _item('m2')]);
+      final List<AppNotification> items = await repo.readAll();
+
+      expect(items.map((AppNotification e) => e.id), <String>['m1', 'm2']);
+    });
+
+    test('isi rusak diperlakukan sebagai kotak masuk kosong', () async {
+      final SharedPrefsInboxRepository repo = SharedPrefsInboxRepository(
+        store: InMemoryKeyValueStore(<String, String>{
+          SharedPrefsInboxRepository.storageKey: 'bukan-json',
         }),
       );
 
-      expect(await store.load(), isEmpty);
+      expect(await repo.readAll(), isEmpty);
     });
 
-    test('jumlah entri dibatasi maxEntries', () async {
-      final store = NotificationStore(InMemoryKeyValueStore());
+    test('satu entri korup dilewati, entri lain tetap terbaca', () async {
+      final SharedPrefsInboxRepository repo = SharedPrefsInboxRepository(
+        store: InMemoryKeyValueStore(<String, String>{
+          SharedPrefsInboxRepository.storageKey: '[{"title":"tanpa id"},'
+              '{"id":"ok","route":"/pengumuman/1","title":"T","body":"B",'
+              '"received_at":"2026-11-02T10:00:00.000"}]',
+        }),
+      );
 
-      for (int i = 0; i < NotificationStore.maxEntries + 5; i++) {
-        await store.append(_item('m$i'));
-      }
+      final List<AppNotification> items = await repo.readAll();
 
-      expect((await store.load()).length, NotificationStore.maxEntries);
+      expect(items.single.id, 'ok');
+      expect(items.single.title, 'T');
     });
   });
 
-  group('NotificationCenter', () {
-    test('add menambah daftar dan memperbarui badge', () async {
-      final RecordingBadgeService badges = RecordingBadgeService();
+  group('NotificationController', () {
+    ProviderContainer makeContainer(RecordingBadge badges) {
       final ProviderContainer container = ProviderContainer(
         overrides: [
           keyValueStoreProvider.overrideWithValue(InMemoryKeyValueStore()),
-          badgeServiceProvider.overrideWithValue(badges),
+          appBadgeProvider.overrideWithValue(badges),
         ],
       );
       addTearDown(container.dispose);
+      return container;
+    }
 
-      final NotificationCenter center =
+    test('add menambah entri dan menaikkan badge', () async {
+      final RecordingBadge badges = RecordingBadge();
+      final ProviderContainer container = makeContainer(badges);
+      final NotificationController center =
           container.read(notificationsProvider.notifier);
 
       await center.add(_item('m1'));
@@ -207,20 +227,13 @@ void main() {
     });
 
     test('markRead menghapus entri dan menurunkan badge', () async {
-      final RecordingBadgeService badges = RecordingBadgeService();
-      final ProviderContainer container = ProviderContainer(
-        overrides: [
-          keyValueStoreProvider.overrideWithValue(InMemoryKeyValueStore()),
-          badgeServiceProvider.overrideWithValue(badges),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      final NotificationCenter center =
+      final RecordingBadge badges = RecordingBadge();
+      final ProviderContainer container = makeContainer(badges);
+      final NotificationController center =
           container.read(notificationsProvider.notifier);
+
       await center.add(_item('m1'));
       await center.add(_item('m2'));
-
       await center.markRead('m2');
 
       expect(
@@ -231,20 +244,13 @@ void main() {
     });
 
     test('markAllRead mengosongkan daftar dan badge', () async {
-      final RecordingBadgeService badges = RecordingBadgeService();
-      final ProviderContainer container = ProviderContainer(
-        overrides: [
-          keyValueStoreProvider.overrideWithValue(InMemoryKeyValueStore()),
-          badgeServiceProvider.overrideWithValue(badges),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      final NotificationCenter center =
+      final RecordingBadge badges = RecordingBadge();
+      final ProviderContainer container = makeContainer(badges);
+      final NotificationController center =
           container.read(notificationsProvider.notifier);
+
       await center.add(_item('m1'));
       await center.add(_item('m2'));
-
       await center.markAllRead();
 
       expect(container.read(notificationsProvider), isEmpty);
@@ -256,15 +262,19 @@ void main() {
       final ProviderContainer container = ProviderContainer(
         overrides: [
           keyValueStoreProvider.overrideWithValue(kv),
-          badgeServiceProvider.overrideWithValue(RecordingBadgeService()),
+          appBadgeProvider.overrideWithValue(RecordingBadge()),
         ],
       );
       addTearDown(container.dispose);
 
       // Ditulis "dari luar" (isolate background) sebelum UI membacanya.
-      await NotificationStore(kv).append(_item('bg1'));
+      final SharedPrefsInboxRepository repo =
+          SharedPrefsInboxRepository(store: kv);
+      await repo.writeAll(
+        NotificationInbox.withAdded(await repo.readAll(), _item('bg1')),
+      );
 
-      final NotificationCenter center =
+      final NotificationController center =
           container.read(notificationsProvider.notifier);
       await center.reload();
 
@@ -276,22 +286,26 @@ void main() {
       // berjalan harus muncul setelah aplikasi kembali aktif. Tanpa reload,
       // daftar di memori tetap basi walau penyimpanan sudah bertambah.
       final InMemoryKeyValueStore kv = InMemoryKeyValueStore();
-      final RecordingBadgeService badges = RecordingBadgeService();
+      final RecordingBadge badges = RecordingBadge();
       final ProviderContainer container = ProviderContainer(
         overrides: [
           keyValueStoreProvider.overrideWithValue(kv),
-          badgeServiceProvider.overrideWithValue(badges),
+          appBadgeProvider.overrideWithValue(badges),
         ],
       );
       addTearDown(container.dispose);
 
-      final NotificationCenter center =
+      final NotificationController center =
           container.read(notificationsProvider.notifier);
       await center.add(_item('fg1'));
       expect(container.read(notificationsProvider).length, 1);
 
       // Ditulis proses lain selagi aplikasi di background.
-      await NotificationStore(kv).append(_item('bg2'));
+      final SharedPrefsInboxRepository repo =
+          SharedPrefsInboxRepository(store: kv);
+      await repo.writeAll(
+        NotificationInbox.withAdded(await repo.readAll(), _item('bg2')),
+      );
       expect(
         container.read(notificationsProvider).length,
         1,
@@ -366,40 +380,38 @@ void main() {
   testWidgets('notifikasi yang dibaca hilang dari daftar dan badge berkurang',
       (WidgetTester tester) async {
     final InMemoryKeyValueStore kv = InMemoryKeyValueStore();
-    final NotificationStore store = NotificationStore(kv);
+    final SharedPrefsInboxRepository repo = SharedPrefsInboxRepository(store: kv);
 
     // Dua notifikasi belum dibaca, seolah diterima sebelum aplikasi dibuka.
-    await store.append(
-      AppNotification.fromMessage(
+    await repo.writeAll(<AppNotification>[
+      AppNotification.create(
         messageId: 'm1',
         title: 'Judul A',
         body: 'Isi A',
         route: '/pengumuman/1',
       ),
-    );
-    await store.append(
-      AppNotification.fromMessage(
+      AppNotification.create(
         messageId: 'm2',
         title: 'Judul B',
         body: 'Isi B',
         route: '/pengumuman/2',
       ),
-    );
+    ]);
 
-    final RecordingBadgeService badges = RecordingBadgeService();
+    final RecordingBadge badges = RecordingBadge();
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          tokenStoreProvider.overrideWithValue(
-            FakeTokenStore(
+          sessionRepositoryProvider.overrideWithValue(
+            FakeSessionRepository(
               access: 'mock-access-for-mhs@polinema.ac.id',
               refresh: 'mock-refresh-for-mhs@polinema.ac.id',
               email: 'mhs@polinema.ac.id',
             ),
           ),
           keyValueStoreProvider.overrideWithValue(kv),
-          badgeServiceProvider.overrideWithValue(badges),
+          appBadgeProvider.overrideWithValue(badges),
         ],
         child: const CampusNotifyApp(
           firebase: FirebaseBootstrap.notConfigured('test'),

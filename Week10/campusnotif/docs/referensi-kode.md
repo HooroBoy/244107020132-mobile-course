@@ -1,43 +1,557 @@
 # Referensi kode
 
-Kontrak setiap berkas di `lib/`, `test/`, dan `tools/`. Untuk gambaran alur dan
-alasan desain, lihat [`arsitektur.md`](arsitektur.md).
+Kontrak setiap berkas di `lib/` dan `test/` setelah restrukturisasi
+**layer-first (data · domain · presentation)**. Untuk alur dan alasan desain,
+lihat [`arsitektur.md`](arsitektur.md).
 
 ## Cara membaca dokumen ini
 
 - **Tanda tangan** ditulis seperti di kode, tanpa `import`.
 - **Invarian** adalah aturan yang tidak boleh dilanggar saat mengubah berkas.
 - **Dikunci oleh** menyebut test yang akan gagal bila perilaku berubah.
-- "Deprecated" berarti sengaja dipakai dengan `// ignore:` beserta alasannya.
+- Urutan bagian mengikuti arah dependensi: `domain` → `data` → `presentation`.
 
-## Ringkasan berkas
+## Ringkasan lapisan
 
-| Berkas | Baris | Tanggung jawab |
+| Lapisan | Folder | Isi | Boleh meng-import |
+|---|---|---|---|
+| Domain | `lib/domain/` | entity, error, kontrak repository, use case, rute, masking | hanya `dart:` |
+| Data | `lib/data/` | implementasi kontrak: Firebase, Dio, secure storage, prefs, FCM, plugin badge | `dart:`, paket, `domain/` |
+| Presentation | `lib/presentation/` | controller Riverpod, composition root, router, halaman, format tampilan | `flutter`, `flutter_riverpod`, `go_router`, `domain/` |
+| Bootstrap | `lib/main.dart` | `bootstrapFirebase()` → `ProviderScope` → `MaterialApp.router` | semua lapisan |
+
+Aturan keras yang dijaga: `domain/` tidak meng-import Flutter/Firebase/Dio, dan
+`presentation/` tidak meng-import SDK apa pun (tidak ada `firebase_messaging`,
+`firebase_auth`, `flutter_secure_storage`, atau `dio` di sana).
+
+## 1. `lib/domain/`
+
+### 1.1 `routes.dart`
+
+```dart
+abstract final class Routes {
+  static const String login = '/login';
+  static const String home = '/';
+  static const String notifications = '/notifikasi';
+  static const String announcementPattern = '/pengumuman/:id';
+  static const String announcementIdParam = 'id';
+  static String announcement(String id);
+  static String sanitize(String? route);
+}
+```
+
+| Aspek | Isi |
+|---|---|
+| Kenapa di domain | Rute adalah kontrak: notifikasi membawa rute, router membukanya. Menaruhnya di presentation akan memaksa lapisan data meng-import UI |
+| `sanitize` | `null`/kosong → `/`; garis miring di depan ditambahkan bila hilang; spasi tepi dibuang |
+
+**Dikunci oleh:** grup `Routes.sanitize` dan `routeFromMessage` di
+`test/payload_test.dart`.
+
+### 1.2 `constants.dart`
+
+```dart
+const String kCampusTopic = 'pengumuman-kampus';
+```
+
+Topik broadcast untuk seluruh mahasiswa. Aturan "semua mahasiswa menerima
+pengumuman" milik domain; nama topik hanyalah detail pengiriman.
+
+### 1.3 `entities/app_notification.dart`
+
+```dart
+class AppNotification {
+  const AppNotification({required id, required title, required body,
+                         required route, required receivedAt});
+  factory AppNotification.create({String? messageId, required String title,
+                                 required String body, required String route,
+                                 DateTime? receivedAt});
+  static const String fallbackTitle = 'Pengumuman';
+  final String id, title, body, route;
+  final DateTime receivedAt;
+}
+```
+
+| Invarian | Alasan |
+|---|---|
+| `id` = `messageId` bila ada, jika tidak `<microsecondsSinceEpoch>-<route>` | Pesan yang dikirim ulang FCM tidak tercatat dua kali |
+| Judul kosong → `fallbackTitle` | Baris daftar tidak pernah kosong |
+| `title`/`body` di-`trim()` | Spasi dari payload tidak ikut tampil |
+
+Entity ini **tidak** punya `toJson`/`fromJson`: serialisasi ada di lapisan data.
+
+**Dikunci oleh:** grup `AppNotification` di `test/notification_test.dart`.
+
+### 1.4 `entities/auth_session.dart`
+
+```dart
+class AuthSession {
+  const AuthSession({required String access, required String refresh, String? email});
+  final String access, refresh;
+  final String? email;
+  String get maskedAccess;                       // maskSecret(access)
+  AuthSession copyWith({String? access, String? refresh, String? email});
+}
+```
+
+**Invarian:** `maskedAccess` adalah satu-satunya bentuk token yang boleh
+dirender. `copyWith` dipakai `RefreshSessionUseCase` untuk mengganti `access`
+tanpa menyentuh `refresh`/`email`.
+
+**Dikunci oleh:** `AuthSession.maskedAccess tidak membocorkan token utuh`
+(`test/auth_test.dart`), `maskSecret` (`test/payload_test.dart`).
+
+### 1.5 `entities/notification_inbox.dart`
+
+```dart
+abstract final class NotificationInbox {
+  static const int maxEntries = 50;
+  static List<AppNotification> withAdded(List<AppNotification> current, AppNotification item);
+  static List<AppNotification> without(List<AppNotification> current, String id);
+}
+```
+
+Fungsi murni: entri baru di urutan teratas, id sama diganti (bukan duplikat),
+panjang dipotong ke `maxEntries`. Karena murni, aturan ini bisa diuji tanpa
+penyimpanan — dan berlaku untuk penyimpanan apa pun.
+
+**Dikunci oleh:** grup `NotificationInbox` (4 test) di `test/notification_test.dart`.
+
+### 1.6 `entities/push_registration.dart`
+
+```dart
+class PushRegistration {
+  PushRegistration({required String? token, required bool permissionGranted,
+                    required bool registeredOnBackend, required Future<void> Function() onStop});
+  Future<void> stop();      // idempoten
+}
+```
+
+Pemegang langganan stream FCM. Satu pemilik untuk pemasangan **dan** pelepasan;
+`stop()` aman dipanggil dua kali.
+
+**Dikunci oleh:** `PushController` grup di `test/push_test.dart` (detach
+menghentikan langganan topik dan pesan tidak lagi dicatat).
+
+### 1.7 `errors/auth_exception.dart`
+
+```dart
+class AuthException implements Exception {
+  const AuthException(this.message);
+  final String message;
+}
+```
+
+Satu-satunya error autentikasi yang boleh naik ke UI. Kode mentah penyedia auth
+diterjemahkan lebih dulu di lapisan data (`firebase_auth_messages.dart`).
+
+### 1.8 `repositories/` — kontrak
+
+| Berkas | Tanda tangan | Implementasi di `data/` |
 |---|---|---|
-| `lib/main.dart` | 116 | Bootstrap, `ProviderScope` (+ override `firebaseReadyProvider`), `MaterialApp.router`, memulai `PushController`, reload kotak masuk saat resume, pasang ulang FCM setelah login |
-| `lib/routes.dart` | 21 | Konstanta path tunggal (termasuk `/notifikasi`) |
-| `lib/data/token_store.dart` | 40 | Satu-satunya akses secure storage |
-| `lib/data/masking.dart` | 8 | `maskSecret()` |
-| `lib/data/auth_repository.dart` | 218 | Kontrak auth, `FirebaseAuthRepository`, `MockAuthRepository`, `authMessageFor()` |
-| `lib/data/api_client.dart` | 85 | `buildApiClient()`: Dio + interceptor 401 |
-| `lib/data/api_errors.dart` | 36 | `friendlyApiMessage()` |
-| `lib/data/device_repository.dart` | 48 | `POST` / `DELETE /devices` |
-| `lib/data/notification_store.dart` | 191 | `AppNotification`, `KeyValueStore`, `NotificationStore` (kotak masuk) |
-| `lib/data/badge_service.dart` | 34 | `BadgeService.setCount()` di atas `AppBadgePlus` |
-| `lib/data/relative_time.dart` | 20 | `relativeTime()` — "5 mnt lalu" |
-| `lib/messaging/firebase_bootstrap.dart` | 83 | Inisialisasi Firebase yang tidak fatal + handler background (mencatat ke kotak masuk) |
-| `lib/messaging/payload.dart` | 32 | `routeFromMessage()`, `idFromMessage()` |
-| `lib/messaging/push_service.dart` | 295 | Izin, token, topik, tiga handler, banner lokal, suara kustom, `_messaging` malas + listener yang bisa dilepas |
-| `lib/providers/auth_provider.dart` | 145 | `firebaseReadyProvider`, provider auth, `AuthNotifier` |
-| `lib/providers/app_router.dart` | 75 | `GoRouter` + guard |
-| `lib/providers/notification_providers.dart` | 108 | `NotificationCenter` + sinkron badge |
-| `lib/providers/push_providers.dart` | 231 | `PushState` (+ `copyWith` ber-sentinel), `PushController` (+ `detach`) |
-| `lib/pages/login_page.dart` | 214 | Form login |
-| `lib/pages/home_page.dart` | 324 | Beranda: sesi, aksi, status notifikasi, lonceng badge, logout yang melepas perangkat |
-| `lib/pages/notifications_page.dart` | 204 | Daftar notifikasi belum dibaca (reload saat dibuka) |
-| `lib/pages/announcement_page.dart` | 80 | Target deep link `/pengumuman/:id` |
+| `auth_repository.dart` | `login({email, password}) → AuthSession`; `refresh(String) → String`; `signOut()` | `FirebaseAuthRepository`, `MockAuthRepository` |
+| `session_repository.dart` | `read() → AuthSession?`; `save(AuthSession)`; `clear()` | `SecureSessionRepository` |
+| `device_repository.dart` | `register({required String token}) → bool`; `unregister({required String token}) → bool` | `HttpDeviceRepository` |
+| `notification_inbox_repository.dart` | `readAll() → List<AppNotification>`; `writeAll(List<AppNotification>)` | `SharedPrefsInboxRepository` |
+| `app_badge.dart` | `setCount(int count)` | `LauncherBadge` |
+| `push_messaging.dart` | `prepare()`, `requestPermission()`, `currentToken()`, `tokenRefresh`, `foregroundMessages`, `openedMessages`, `bannerTaps`, `initialMessage()`, `subscribeTopic()`, `unsubscribeTopic()`, `showBanner()` | `FcmPushMessaging` |
 
-## `lib/main.dart`
+Invarian kontrak:
+
+| Kontrak | Invarian | Alasan |
+|---|---|---|
+| `AuthRepository` | `signOut` ada **di dalam** interface, bukan interface tambahan yang diperiksa `is` | Setiap implementasi benar-benar bisa saling menggantikan (LSP); `MockAuthRepository.signOut` no-op |
+| `SessionRepository` | `read()` mengembalikan sesi apa adanya, termasuk yang tidak lengkap | Yang menilai "sesi rusak" adalah `RestoreSessionUseCase`, bukan penyimpanan |
+| `DeviceRepository` | Nama platform **tidak** menjadi parameter | Deteksi platform adalah kemampuan lapisan data (`platform_name.dart`) |
+| `NotificationInboxRepository` | Hanya `readAll`/`writeAll`; tanpa aturan dedupe/batas | Aturan bisnis di `NotificationInbox`; penyimpanan bisa diganti tanpa menyentuh domain |
+| `PushMessaging` | Hanya memakai istilah domain (`AppNotification`, `String` rute/token) | `presentation/` tidak pernah meng-import `firebase_messaging` |
+
+**Dikunci oleh:** `test/api_client_test.dart` (kontrak sesi + auth),
+`test/push_test.dart` (kontrak device + push messaging),
+`test/notification_test.dart` (kontrak kotak masuk).
+
+### 1.9 `usecases/` — satu kelas, satu aksi bisnis
+
+| Use case | Masukan → Keluaran | Invarian |
+|---|---|---|
+| `auth/LoginUseCase` | `(email, password) → AuthSession` | Login **lalu** simpan; UI tidak perlu tahu urutannya |
+| `auth/RestoreSessionUseCase` | `() → AuthSession?` | Sesi setengah jadi (access ada, refresh kosong) dibersihkan lalu `null` |
+| `auth/RefreshSessionUseCase` | `() → AuthSession` | Hanya `access` yang diganti; `refresh`/`email` dipertahankan; gagal → `AuthException` |
+| `auth/LogoutUseCase` | `() → void` | Urutan: `unregister` → `unsubscribeTopic` → `signOut` → `clear`. `DELETE /devices` butuh header Authorization dari sesi yang masih ada |
+| `notifications/LoadInboxUseCase` | `() → List<AppNotification>` | Membaca ulang penyimpanan lalu menyelaraskan badge |
+| `notifications/AddNotificationUseCase` | `(AppNotification) → List<AppNotification>` | Memakai `NotificationInbox.withAdded` (dedupe + batas) lalu simpan + badge |
+| `notifications/MarkNotificationReadUseCase` | `(String id) → List<AppNotification>` | Entri hilang dari daftar = sudah dibaca |
+| `notifications/MarkAllNotificationsReadUseCase` | `() → List<AppNotification>` | `writeAll([])` + badge 0 |
+| `notifications/SyncBadgeUseCase` | `(int unread) → void` | Angka negatif dijadikan 0; kegagalan platform ditelan |
+| `push/StartPushUseCase` | `({onRoute, onNotification, onOpened}) → PushRegistration` | `prepare()` **sebelum** pesan pertama (kanal immutable); token dilaporkan ke backend; token refresh dilaporkan ulang; listener dikembalikan sebagai satu paket |
+| `push/SendTestNotificationUseCase` | `() → void` | Membuat entri demo → catat ke kotak masuk → tampilkan banner |
+| `push/SetTopicSubscriptionUseCase` | `({required bool subscribe}) → void` | Satu jalur untuk berlangganan/berhenti |
+
+**Dikunci oleh:** `test/auth_test.dart` (login, restore, refresh),
+`test/notification_test.dart` (add/markRead/markAllRead + badge),
+`test/push_test.dart` (start/detach/token refresh).
+
+### 1.10 `utils/masking.dart`
+
+```dart
+String maskSecret(String value);
+```
+
+Nilai ≤ 12 karakter → `••••••`; selain itu 8 karakter awal + `••••` + 4 karakter
+akhir. **Dikunci oleh:** grup `maskSecret` di `test/payload_test.dart`.
+
+## 2. `lib/data/`
+
+### 2.1 `datasources/key_value_store.dart`
+
+```dart
+abstract interface class KeyValueStore {
+  Future<String?> read(String key);
+  Future<void> write(String key, String value);
+}
+class PrefsKeyValueStore implements KeyValueStore   // SharedPreferencesAsync
+class InMemoryKeyValueStore implements KeyValueStore // dipakai test
+```
+
+Abstraksi ini membuat `SharedPrefsInboxRepository` bisa diuji tanpa platform
+channel. **Dikunci oleh:** seluruh grup `SharedPrefsInboxRepository` dan
+`NotificationController` di `test/notification_test.dart`.
+
+### 2.2 `mappers/app_notification_mapper.dart`
+
+```dart
+Map<String, dynamic> appNotificationToJson(AppNotification notification);
+AppNotification? appNotificationFromJson(Map<String, dynamic> json);
+```
+
+Kunci JSON: `id`, `title`, `body`, `route`, `received_at` (ISO-8601).
+`fromJson` mengembalikan `null` untuk entri rusak (tanpa `id`/`route`), sehingga
+satu entri korup tidak menghapus seluruh kotak masuk.
+
+**Dikunci oleh:** `serialisasi bolak-balik mempertahankan isi` dan
+`satu entri korup dilewati` di `test/notification_test.dart`.
+
+### 2.3 `messaging/fcm_mapper.dart`
+
+```dart
+String routeFromMessage(Map<String, dynamic> data);
+String? idFromMessage(Map<String, dynamic> data);
+AppNotification appNotificationFromMessage(RemoteMessage message);
+```
+
+Fungsi murni (kecuali yang terakhir) — bisa diuji tanpa Firebase. Satu-satunya
+tempat yang tahu bentuk `RemoteMessage`.
+
+**Dikunci oleh:** grup `routeFromMessage` + `idFromMessage` (7 test) di
+`test/payload_test.dart`.
+
+### 2.4 `messaging/fcm_push_messaging.dart`
+
+```dart
+const String kNotificationSoundResource = 'campus_notif';
+const AndroidNotificationChannel kAnnouncementChannel;   // id: pengumuman_v2
+
+class FcmPushMessaging implements PushMessaging {
+  FcmPushMessaging({FirebaseMessaging? messaging, FlutterLocalNotificationsPlugin? local});
+}
+```
+
+| Invarian | Alasan |
+|---|---|
+| `_messaging` adalah **getter malas**, bukan field | `FirebaseMessaging.instance` memanggil `Firebase.app()` yang melempar bila Firebase belum diinisialisasi; kelas harus tetap bisa dibuat pada mode tanpa `google-services.json` |
+| `prepare()` membuat kanal secara eksplisit | Setelan kanal Android **immutable**; bila dibuat otomatis oleh pesan pertama, suara kustom tidak akan pernah terpasang |
+| `initialMessage()` hanya mengembalikan pesan sekali | `getInitialMessage()` mengembalikan pesan yang sama bila dipanggil ulang → deep link terbuka dua kali |
+| `tokenRefresh`/`foregroundMessages`/`openedMessages` berupa `Stream` | Pemegang langganan adalah `StartPushUseCase`; pelepasan jadi eksplisit lewat `PushRegistration.stop()` |
+
+### 2.5 `messaging/firebase_bootstrap.dart`
+
+```dart
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message);
+
+class FirebaseBootstrap { const FirebaseBootstrap({required bool ready, String? reason}); }
+
+Future<FirebaseBootstrap> bootstrapFirebase();
+```
+
+| Aspek | Isi |
+|---|---|
+| Handler background | Fungsi top-level (isolate terpisah). Hanya mencatat ke kotak masuk lewat `SharedPrefsInboxRepository` + `NotificationInbox.withAdded`; tidak menyentuh `BuildContext`, Riverpod, atau router |
+| `DartPluginRegistrant.ensureInitialized()` | Plugin (`shared_preferences`) butuh registrant di isolate terpisah |
+| Kegagalan | Ditangkap dan dilaporkan sebagai `FirebaseBootstrap(ready: false, reason: ...)`, bukan crash |
+| Log | Hanya `messageId` dan `runtimeType` error; tidak ada token |
+
+### 2.6 `platform/platform_name.dart`
+
+```dart
+String get platformName;   // 'android' | 'ios' | 'web' | ...
+```
+
+Dipakai `HttpDeviceRepository` saat mengirim `POST /devices`, sehingga domain
+tidak perlu tahu API platform.
+
+### 2.7 `repositories/secure_session_repository.dart`
+
+```dart
+class SecureSessionRepository implements SessionRepository {
+  SecureSessionRepository({FlutterSecureStorage? storage});
+  static const String storageKey...   // access_token, refresh_token, session_email
+}
+```
+
+Satu-satunya berkas yang menyentuh `flutter_secure_storage`.
+
+**Invarian:** `read()` mengembalikan `null` hanya bila `access` kosong; sesi
+tanpa `refresh` dikembalikan dengan `refresh: ''` agar domain yang memutuskan
+sesi itu rusak. `clear()` memakai `deleteAll()`.
+
+**Dikunci oleh:** `test/auth_test.dart` (`sesi setengah jadi dibersihkan`),
+`test/api_client_test.dart`, `test/notification_test.dart` (lewat
+`FakeSessionRepository`).
+
+### 2.8 `repositories/firebase_auth_repository.dart`
+
+```dart
+const String kOpaqueRefreshToken = 'firebase:getIdToken';
+class FirebaseAuthRepository implements AuthRepository { FirebaseAuthRepository({FirebaseAuth? auth}); }
+```
+
+| Metode | Perilaku |
+|---|---|
+| `login` | `signInWithEmailAndPassword` → `getIdToken()` sebagai `access` → `refreshToken` (atau `kOpaqueRefreshToken` bila platform tidak mengeksposnya) |
+| `refresh` | `user.getIdToken(true)`; argumen `refreshToken` hanya penanda karena Firebase menyimpan sesinya sendiri |
+| `signOut` | `FirebaseAuth.signOut()` — ada di interface, bukan `is SignOutCapable` |
+
+Semua `FirebaseAuthException` diterjemahkan lewat `authMessageFor()`.
+
+### 2.9 `repositories/mock_auth_repository.dart`
+
+```dart
+class MockAuthRepository implements AuthRepository { const MockAuthRepository(); }
+```
+
+Demo offline + test: email mengandung `@`, sandi ≥ 6 karakter, token
+`mock-access-for-<email>`. `refresh` menolak `mock-refresh-revoked` (dipakai test
+"refresh ditolak → sesi dibersihkan"). `signOut` no-op.
+
+### 2.10 `repositories/http_device_repository.dart`
+
+```dart
+class HttpDeviceRepository implements DeviceRepository { const HttpDeviceRepository(Dio dio); }
+```
+
+| Endpoint | Body | Catatan |
+|---|---|---|
+| `POST /devices` | `{"fcm_token": ..., "platform": platformName}` | Header Authorization dari interceptor |
+| `DELETE /devices` | `{"fcm_token": ...}` | Butuh sesi aktif — karena itu `LogoutUseCase` memanggilnya sebelum `clear()` |
+
+Kegagalan jaringan → `false`, tidak melempar. **Dikunci oleh:**
+`FakeDeviceRepository` di `test/push_test.dart`.
+
+### 2.11 `repositories/shared_prefs_inbox_repository.dart`
+
+```dart
+class SharedPrefsInboxRepository implements NotificationInboxRepository {
+  SharedPrefsInboxRepository({KeyValueStore? store});
+  static const String storageKey = 'campus_notif.inbox';
+}
+```
+
+Menyimpan JSON array di satu kunci. `readAll()` mengembalikan daftar kosong bila
+data bukan JSON valid; `writeAll()` menulis seluruh daftar (bukan append), jadi
+aturan urutan/dedupe sepenuhnya milik domain.
+
+### 2.12 `repositories/launcher_badge.dart`
+
+```dart
+class LauncherBadge implements AppBadge { const LauncherBadge(); }
+```
+
+`AppBadgePlus.isSupported()` → bila `false`, berhenti tanpa error. Semua
+exception platform ditelan: badge hanya pelengkap.
+
+### 2.13 `http/api_client.dart`
+
+```dart
+const String kApiBaseUrl = 'https://example-campus-api.test';
+Dio buildApiClient({required SessionRepository sessions, required AuthRepository auth,
+                    required Future<void> Function() onSessionExpired, String baseUrl});
+```
+
+| Aspek | Isi |
+|---|---|
+| `onRequest` | Menyisipkan `Authorization: Bearer <access>` bila header belum ada |
+| `onError` 401 | Satu kali `auth.refresh()` → `sessions.save(copyWith(access:))` → `dio.fetch()` ulang dengan penanda `extra['auth_retried']` |
+| Refresh gagal / tidak ada refresh | `sessions.clear()` + `onSessionExpired()` → error asli diteruskan (tanpa retry berulang) |
+
+**Dikunci oleh:** ketiga test di `test/api_client_test.dart` (2 request saat
+sukses, 1 request saat refresh mati).
+
+### 2.14 `errors/api_error_messages.dart`
+
+```dart
+String friendlyApiMessage(Object error);
+```
+
+`DioException` → kalimat Indonesia (timeout, tanpa koneksi, 401/403/404/5xx,
+dll.). UI tidak pernah merender `DioException` mentah.
+
+### 2.15 `errors/firebase_auth_messages.dart`
+
+```dart
+String authMessageFor(String code, String? fallback);
+```
+
+Pemetaan kode Firebase Auth (`wrong-password`, `invalid-credential`,
+`too-many-requests`, …) → kalimat Indonesia. **Dikunci oleh:** grup
+`authMessageFor` (3 test) di `test/notification_test.dart`.
+
+## 3. `lib/presentation/`
+
+### 3.1 `providers/dependencies.dart`
+
+Composition root: seluruh provider dependency dan use case.
+
+```dart
+final Provider<bool> firebaseReadyProvider;                        // default false
+final Provider<KeyValueStore> keyValueStoreProvider;
+final Provider<SessionRepository> sessionRepositoryProvider;
+final Provider<AuthRepository> authRepositoryProvider;             // Firebase / mock
+final Provider<Dio> apiClientProvider;
+final Provider<DeviceRepository> deviceRepositoryProvider;
+final Provider<PushMessaging> pushMessagingProvider;
+final Provider<NotificationInboxRepository> inboxRepositoryProvider;
+final Provider<AppBadge> appBadgeProvider;
+// 12 provider use case: syncBadge, loadInbox, addNotification,
+// markNotificationRead, markAllNotificationsRead, login, restoreSession,
+// refreshSession, logout, startPush, sendTestNotification, setTopicSubscription
+```
+
+**Invarian:** ini satu-satunya berkas yang menyebut nama kelas konkret dari
+`data/`. Menambah implementasi baru cukup menambah/mengganti satu baris di sini.
+
+### 3.2 `providers/app_router.dart`
+
+```dart
+final Provider<GoRouter> appRouterProvider;
+```
+
+| Aspek | Isi |
+|---|---|
+| Guard | `auth.isLoading && !auth.hasValue` → `null` (jangan ambil keputusan saat sesi masih dibaca); belum login & bukan `/login` → `/login`; sudah login di `/login` → `/` |
+| `refreshListenable` | `_AuthRefresh` menjembatani `ref.listen(authControllerProvider)` ke `ChangeNotifier` |
+| Rute | `/login`, `/`, `/notifikasi`, `/pengumuman/:id` (semua dari `Routes`) |
+
+**Invarian:** router dibuat **sekali**; perubahan sesi hanya memicu redirect.
+
+### 3.3 `providers/auth/auth_controller.dart`
+
+```dart
+final AsyncNotifierProvider<AuthController, AuthSession?> authControllerProvider;
+
+class AuthController extends AsyncNotifier<AuthSession?> {
+  Future<AuthSession?> build();               // RestoreSessionUseCase
+  Future<void> login(String email, String password);
+  Future<bool> refreshSession();
+  Future<void> logout();
+  Future<void> forceLogout();
+}
+```
+
+| Metode | Perilaku |
+|---|---|
+| `login` | `AsyncLoading` → `AsyncValue.guard(LoginUseCase)` |
+| `refreshSession` | Sukses → `AsyncData(sesi baru)`; gagal → `forceLogout()` + `false` |
+| `logout` | `LogoutUseCase`; bila jaringan gagal, sesi lokal tetap dibersihkan |
+| `forceLogout` | `clear()` + `signOut()` tanpa melempar ke UI (dipakai interceptor) |
+
+**Dikunci oleh:** 5 test di `test/auth_test.dart` (guard route, login, sesi
+setengah jadi, refresh sukses/gagal).
+
+### 3.4 `providers/notifications/notification_controller.dart`
+
+```dart
+final NotifierProvider<NotificationController, List<AppNotification>> notificationsProvider;
+
+class NotificationController extends Notifier<List<AppNotification>> {
+  int get unreadCount;                        // state.length
+  Future<void> reload();
+  Future<void> add(AppNotification notification);
+  Future<void> markRead(String id);
+  Future<void> markAllRead();
+}
+```
+
+| Invarian | Alasan |
+|---|---|
+| `build()` mengembalikan `[]` lalu memanggil `reload()` lewat microtask | `state` tidak boleh diubah saat build |
+| Setiap method memakai `_disposed` guard | Provider bisa dibuang saat operasi async masih berjalan |
+| Angka badge tidak disimpan di sini | Satu sumber kebenaran: `state.length` → `SyncBadgeUseCase` |
+
+### 3.5 `providers/push/push_state.dart`
+
+```dart
+class PushState {
+  const PushState({started, permissionGranted, token, registeredOnBackend,
+                   subscribedTopic, lastRoute, note});
+  String get maskedToken;
+  PushState copyWith({bool? started, bool? permissionGranted, Object? token = _unset,
+                      bool? registeredOnBackend, bool? subscribedTopic,
+                      Object? lastRoute = _unset, Object? note = _unset});
+}
+```
+
+**Invarian `copyWith`:** field nullable memakai sentinel `_unset`, sehingga
+`copyWith(note: null)` berarti **mengosongkan**, sedangkan parameter yang tidak
+disebut mempertahankan nilai lama. Tanpa sentinel, catatan error tidak bisa
+dihapus dan `token` tidak bisa dikosongkan saat logout.
+
+**Dikunci oleh:** grup `PushState.copyWith` (5 test) di `test/push_test.dart`.
+
+### 3.6 `providers/push/push_controller.dart`
+
+```dart
+final NotifierProvider<PushController, PushState> pushProvider;
+
+class PushController extends Notifier<PushState> {
+  Future<void> start({required bool firebaseReady, String? firebaseNote});
+  Future<void> detach();
+  Future<void> sendTestNotification();
+  Future<void> toggleTopic(bool subscribe);
+}
+```
+
+| Aspek | Isi |
+|---|---|
+| `start` | `started` true → berhenti (tidak memasang listener ganda); Firebase belum siap → hanya menulis `note`; selebihnya `StartPushUseCase` |
+| `note` | Diturunkan dari `PushRegistration`: izin ditolak / `POST /devices` belum tersedia / `null` |
+| `detach` | `PushRegistration.stop()` → state direset (`started: false`, `token: null`, `note: null`) supaya `start()` bisa jalan lagi setelah login berikutnya |
+| `_go` | `Routes.sanitize` → `lastRoute` → `appRouterProvider.go` (satu-satunya tempat navigasi dari notifikasi) |
+| `_openFromNotification` | `markRead(id)` bila ada `messageId`, lalu `_go(route)` |
+
+**Dikunci oleh:** 9 test di `test/push_test.dart` (registrasi, token refresh,
+izin ditolak, tanpa Firebase, pesan foreground, detach, start ulang).
+
+### 3.7 `utils/relative_time.dart`
+
+```dart
+String relativeTime(DateTime at, {DateTime? now});
+```
+
+`baru saja` (< 60 dtk atau waktu masa depan), `N mnt lalu`, `N jam lalu`,
+`N hr lalu`, lalu `dd/MM/yyyy`. Parameter `now` membuat test deterministik.
+**Dikunci oleh:** grup `relativeTime` (4 test) di `test/notification_test.dart`.
+
+### 3.8 `pages/`
+
+| Berkas | Tanggung jawab | Catatan |
+|---|---|---|
+| `login_page.dart` | Form email + sandi, validasi lokal, panggil `authControllerProvider.notifier.login` | Tidak memanggil `context.go()`; perpindahan layar hasil guard |
+| `home_page.dart` | Kartu sesi (token ter-mask), tombol refresh, kartu status FCM, lonceng + badge, tombol notifikasi uji, logout | Logout: `pushProvider.notifier.detach()` **lalu** `authControllerProvider.notifier.logout()` |
+| `notifications_page.dart` | Daftar notifikasi belum dibaca, tarik-untuk-menyegarkan, "tandai semua" | `reload()` saat halaman dibuka karena handler background menulis dari isolate lain |
+| `announcement_page.dart` | Target deep link `/pengumuman/:id` (data demo) | Menampilkan `id` dari `pathParameters` |
+
+## 4. `lib/main.dart`
 
 ```dart
 Future<void> main() async
@@ -47,671 +561,54 @@ class CampusNotifyApp extends ConsumerStatefulWidget
 
 | Aspek | Isi |
 |---|---|
-| Urutan bootstrap | `WidgetsFlutterBinding.ensureInitialized()` → `await bootstrapFirebase()` → `runApp(ProviderScope(...))` |
+| Urutan bootstrap | `WidgetsFlutterBinding.ensureInitialized()` → `await bootstrapFirebase()` → `runApp(ProviderScope(overrides: [firebaseReadyProvider.overrideWithValue(...)]))` |
 | Tema | `ColorScheme.fromSeed(seedColor: Color(0xFF0B6E4F))`, light + dark, `debugShowCheckedModeBanner: false` |
 | Router | `ref.watch(appRouterProvider)` |
-| FCM | `initState` → `addPostFrameCallback` → `_startPush()` → `pushProvider.notifier.start(firebaseReady:, firebaseNote:)`; `ref.listenManual(authStateProvider)` memanggil `_startPush()` lagi pada login berikutnya, karena logout sudah melepas perangkat dari backend |
-| Siklus hidup | `AppLifecycleListener(onResume:)` → `notificationsProvider.notifier.reload()` (menyusul entri yang ditulis handler background) |
+| FCM | `initState` → `addPostFrameCallback` → `_startPush()` → `pushProvider.notifier.start(firebaseReady:, firebaseNote:)`; `ref.listenManual(authControllerProvider)` memanggil `_startPush()` lagi pada login berikutnya |
+| Siklus hidup | `AppLifecycleListener(onResume:)` → `notificationsProvider.notifier.reload()` |
 
-**Invarian:** `start()` tidak boleh dipanggil sebelum frame pertama; `routerConfig`
-tidak boleh dibuat dengan `GoRouter(...)` baru di dalam `build`.
+**Invarian:** `start()` tidak boleh dipanggil sebelum frame pertama
+(`getInitialMessage()` butuh router yang sudah terpasang); `routerConfig` tidak
+boleh dibuat dengan `GoRouter(...)` baru di dalam `build`.
 
-## `lib/routes.dart`
+## 5. `test/`
 
-```dart
-abstract final class Routes {
-  static const String login = '/login';
-  static const String home = '/';
-  static const String announcementPattern = '/pengumuman/:id';
-  static const String announcementIdParam = 'id';
-  static String announcement(String id) => '/pengumuman/$id';
-}
-```
-
-**Invarian:** tidak ada string path literal di berkas lain. `Routes.home` dipakai
-sebagai nilai aman untuk payload kosong.
-
-## `lib/data/token_store.dart`
-
-```dart
-class TokenStore {
-  TokenStore({FlutterSecureStorage? storage});
-  Future<void> save({required String access, required String refresh, String? email});
-  Future<String?> readAccess();
-  Future<String?> readRefresh();
-  Future<String?> readEmail();
-  Future<bool> hasSession();
-  Future<void> clear();
-}
-```
-
-| Kunci storage | Isi |
-|---|---|
-| `access_token` | Access token |
-| `refresh_token` | Refresh token |
-| `session_email` | Email pemilik sesi (opsional) |
-
-**Invarian:** hanya berkas ini yang boleh meng-import
-`flutter_secure_storage`. Konstruktor menerima `storage` agar test bisa
-menyuntikkan implementasi lain (dipakai subclass fake di test).
-
-**Catatan:** `clear()` memakai `deleteAll()`, jadi menghapus **semua** kunci milik
-plugin pada aplikasi ini.
-
-## `lib/data/masking.dart`
-
-```dart
-String maskSecret(String value)
-```
-
-| Panjang masukan | Keluaran |
-|---|---|
-| ≤ 12 | `••••••` |
-| > 12 | 8 karakter awal + `••••` + 4 karakter akhir |
-
-**Dikunci oleh:** `test/payload_test.dart` grup `maskSecret`.
-
-## `lib/data/auth_repository.dart`
-
-```dart
-class AuthSession {
-  const AuthSession({required String access, required String refresh, String? email});
-  String get maskedAccess;
-}
-
-abstract class AuthRepository {
-  Future<AuthSession> login({required String email, required String password});
-  Future<String> refresh(String refreshToken);
-}
-
-abstract interface class SignOutCapable {
-  Future<void> signOut();
-}
-
-const String kOpaqueRefreshToken = 'firebase:getIdToken';
-
-class FirebaseAuthRepository implements AuthRepository, SignOutCapable {
-  FirebaseAuthRepository({FirebaseAuth? auth});
-}
-
-class MockAuthRepository implements AuthRepository {
-  const MockAuthRepository();
-}
-
-String authMessageFor(String code, String? fallback);
-
-class AuthException implements Exception {
-  const AuthException(String message);
-  final String message;
-}
-```
-
-### `FirebaseAuthRepository` (produksi)
-
-| Perilaku | Detail |
-|---|---|
-| `login` | `signInWithEmailAndPassword` → `User.getIdToken()` (access) → `User.refreshToken` |
-| Refresh tidak tersedia | Disimpan sebagai `kOpaqueRefreshToken`, bukan rahasia |
-| `refresh` | `User.getIdToken(forceRefresh: true)`; argumen `refreshToken` sengaja diabaikan |
-| `currentUser` null | `AuthException('Sesi Firebase tidak ditemukan. Silakan login ulang.')` |
-| `FirebaseAuthException` | Diterjemahkan `authMessageFor()` → pesan Indonesia |
-| `signOut()` | Menghapus sesi Firebase saat logout |
-
-### `MockAuthRepository` (demo offline + test)
-
-| Perilaku | Detail |
-|---|---|
-| `login` valid | Email mengandung `@` **dan** sandi ≥ 6 karakter |
-| `login` tidak valid | `AuthException('Email atau kata sandi tidak valid')` |
-| Token mock | `mock-access-for-<email>` / `mock-refresh-for-<email>` |
-| Jeda buatan | 500 ms (login), 300 ms (refresh) — agar state loading terlihat |
-| `refresh` kosong | `AuthException('Refresh token hilang atau kedaluwarsa')` |
-| `refresh` = `mock-refresh-revoked` | `AuthException('Refresh token ditolak server')` |
-| `refresh` berhasil | `mock-access-renewed-<epoch ms>` |
-
-Pemilihan implementasi ada di `authRepositoryProvider` berdasarkan
-`firebaseReadyProvider`. `authMessageFor()` memetakan kode Firebase
-(`wrong-password`, `user-not-found`, `too-many-requests`, …) menjadi kalimat
-yang aman ditampilkan; kode mentah tidak pernah sampai ke UI.
-
-## `lib/data/api_client.dart`
-
-```dart
-const String kApiBaseUrl = 'https://example-campus-api.test';
-
-Dio buildApiClient({
-  required TokenStore store,
-  required AuthRepository auth,
-  required Future<void> Function() onSessionExpired,
-  String baseUrl = kApiBaseUrl,
-});
-```
-
-| Aspek | Nilai |
-|---|---|
-| `connectTimeout` | 10 detik |
-| `receiveTimeout` | 10 detik |
-| Penanda retry | `extra['auth_retried'] = true` (privat, `_retryFlag`) |
-| Header otomatis | `Authorization: Bearer <access>` bila belum diset pemanggil |
-
-Alur `onError`:
-
-1. Bukan 401, atau sudah pernah diulang → teruskan error.
-2. 401, refresh kosong → `store.clear()` + `onSessionExpired()` + teruskan error.
-3. 401, refresh ada → `auth.refresh()` → `store.save(access: baru, refresh: lama)` →
-   `dio.fetch(requestOptions)` dengan penanda retry → `handler.resolve(...)`.
-4. Refresh melempar apa pun → `store.clear()` + `onSessionExpired()` + teruskan
-   error **asli** (bukan error refresh).
-
-**Invarian:** maksimal satu retry per request; refresh token lama tidak dihapus
-kecuali sesi dibersihkan.
-
-**Dikunci oleh:** `test/api_client_test.dart` (3 test: sukses retry, refresh
-mati, refresh tidak tersimpan).
-
-## `lib/data/api_errors.dart`
-
-```dart
-String friendlyApiMessage(Object error);
-```
-
-| Kondisi | Pesan |
-|---|---|
-| Timeout (connect/send/receive/transform) | "Koneksi lambat. Coba lagi sebentar." |
-| `connectionError` | "Tidak ada koneksi internet." |
-| 401 | "Sesi berakhir. Silakan login ulang." |
-| 403 | "Anda tidak punya akses ke data ini." |
-| 404 | "Data tidak ditemukan." |
-| ≥ 500 | "Server sedang bermasalah. Coba lagi nanti." |
-| Status lain | "Permintaan ditolak server (<status>)." |
-| `cancel` | "Permintaan dibatalkan." |
-| `badCertificate` | "Sertifikat server tidak valid." |
-| `unknown` / bukan `DioException` | "Terjadi kesalahan tak terduga." |
-
-**Catatan:** pesan "Sesi berakhir" berasal dari pemetaan status 401, bukan dari
-exception khusus. `AuthExpiredException` pernah didefinisikan di sini tetapi
-tidak pernah dilempar oleh kode mana pun, sehingga dihapus agar tidak ada jalur
-error yang tidak terpakai.
-
-## `lib/data/device_repository.dart`
-
-```dart
-class DeviceRepository {
-  const DeviceRepository(Dio dio);
-  Future<bool> registerDevice({required String token, required String platform});
-  Future<bool> unregisterDevice({required String token});
-}
-```
-
-| Endpoint | Body | Sukses |
+| Berkas | Jumlah | Cakupan |
 |---|---|---|
-| `POST /devices` | `{"fcm_token": "<token>", "platform": "android"}` | status 2xx → `true` |
-| `DELETE /devices` | `{"fcm_token": "<token>"}` | status 2xx → `true` |
+| `payload_test.dart` | 11 | `routeFromMessage` (4), `idFromMessage` (3), `Routes.sanitize` (2), `maskSecret` (2) |
+| `api_client_test.dart` | 3 | 401 → refresh sekali → retry sukses (2 request); refresh mati → 1 request + sesi dibersihkan; tanpa refresh token → langsung bersihkan |
+| `auth_test.dart` | 8 | Widget: guard route, sesi tersimpan, sesi setengah jadi, login valid, login invalid. Unit: refresh sukses, refresh ditolak, `maskedAccess` |
+| `notification_test.dart` | 26 | `AppNotification` + mapper (5), `NotificationInbox` (4), `SharedPrefsInboxRepository` (4), `NotificationController` + badge (5), `relativeTime` (4), `authMessageFor` (3), widget "dibaca → hilang" (1) |
+| `push_test.dart` | 14 | `PushState.copyWith` + `maskedToken` (5), `PushController` (9): start, token refresh, catatan `POST /devices`, izin ditolak, tanpa Firebase, pesan foreground, detach, tidak mencatat setelah detach, start ulang |
 
-**Invarian:** `DioException` ditangkap dan dikembalikan sebagai `false`; tidak ada
-exception yang naik ke UI. Header `Authorization` disisipkan interceptor, bukan
-oleh repository.
+Total: **62 test**.
 
-## `lib/data/notification_store.dart`
+### 5.1 Fake yang tersedia
 
-```dart
-class AppNotification {
-  const AppNotification({required this.id, required this.title, required this.body,
-      required this.route, required this.receivedAt});
-  factory AppNotification.fromMessage({String? messageId, required String title,
-      required String body, required String route, DateTime? receivedAt});
-  Map<String, dynamic> toJson();
-  static AppNotification? fromJson(Map<String, dynamic> json);
-}
-
-abstract interface class KeyValueStore {
-  Future<String?> read(String key);
-  Future<void> write(String key, String value);
-}
-
-class PrefsKeyValueStore implements KeyValueStore { PrefsKeyValueStore({SharedPreferencesAsync? prefs}); }
-class InMemoryKeyValueStore implements KeyValueStore { InMemoryKeyValueStore([Map<String, String>? initial]); }
-
-class NotificationStore {
-  NotificationStore(KeyValueStore store);
-  static const String storageKey = 'campus_notif.inbox';
-  static const int maxEntries = 50;
-  Future<List<AppNotification>> load();
-  Future<List<AppNotification>> append(AppNotification notification);
-  Future<List<AppNotification>> remove(String id);
-  Future<List<AppNotification>> clear();
-}
-```
-
-| Perilaku | Detail |
-|---|---|
-| `id` | `messageId` FCM bila ada; jika tidak `<microsecondsSinceEpoch>-<route>` |
-| Judul kosong | Diganti `Pengumuman` |
-| `append` | Entri baru di depan; id sama diganti; dipotong pada `maxEntries` |
-| `remove` | Menghapus satu entri (efek "dibaca") lalu menyimpan |
-| `load` data rusak | Mengembalikan daftar kosong (tidak melempar) |
-| `fromJson` tanpa id/route | `null` — entri dilewati |
-
-**Dikunci oleh:** `test/notification_test.dart` grup `AppNotification` dan
-`NotificationStore`.
-
-## `lib/data/badge_service.dart`
-
-```dart
-class BadgeService {
-  const BadgeService();
-  Future<void> setCount(int count);
-}
-```
-
-`isSupported()` lalu `updateBadge(n)`; nilai negatif dianggap 0; semua kegagalan
-platform ditelan. **Dikunci oleh:** override `RecordingBadgeService` di
-`test/notification_test.dart`.
-
-## `lib/data/relative_time.dart`
-
-```dart
-String relativeTime(DateTime at, {DateTime? now});
-```
-
-`< 60 dtk` → `baru saja`; `< 60 mnt` → `N mnt lalu`; `< 24 jam` → `N jam lalu`;
-`< 7 hari` → `N hr lalu`; selain itu `dd/MM/yyyy`. Waktu di masa depan →
-`baru saja`. **Dikunci oleh:** grup `relativeTime` (4 test).
-
-## `lib/messaging/firebase_bootstrap.dart`
-
-```dart
-@pragma('vm:entry-point')
-Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message);
-
-class FirebaseBootstrap {
-  const FirebaseBootstrap({required bool ready, String? reason});
-  const FirebaseBootstrap.notConfigured(String reason);
-  final bool ready;
-  final String? reason;
-}
-
-Future<FirebaseBootstrap> bootstrapFirebase();
-```
-
-| Perilaku | Detail |
-|---|---|
-| Sukses | `Firebase.initializeApp()` + daftarkan `onBackgroundMessage` → `ready: true` |
-| Gagal, konfigurasi hilang | Pesan: "Firebase belum dikonfigurasi: letakkan google-services.json di android/app/ lalu build ulang." |
-| Gagal, sebab lain | "Firebase gagal diinisialisasi: <error>" |
-| Deteksi konfigurasi hilang | Pesan error mengandung `google-services`, `FirebaseOptions`, `not been correctly initialized`, atau `core/no-app` |
-| Log di background | Hanya `messageId`; kegagalan pencatatan hanya mencetak `runtimeType` |
-| Mencatat ke kotak masuk | `NotificationStore(PrefsKeyValueStore()).append(...)` dengan `DartPluginRegistrant.ensureInitialized()` lebih dulu |
-
-**Invarian:** handler background wajib fungsi top-level, tidak boleh menyentuh
-`BuildContext`, Riverpod, router, atau state UI; `bootstrapFirebase()` tidak
-pernah melempar. Penulisan ke kotak masuk dibungkus `try/catch` agar kegagalan
-penyimpanan tidak menggagalkan penayangan notifikasi oleh sistem.
-
-## `lib/messaging/payload.dart`
-
-```dart
-String routeFromMessage(Map<String, dynamic> data);
-String? idFromMessage(Map<String, dynamic> data);
-```
-
-Fungsi murni tanpa dependensi Firebase. Aturan lengkap ada di
-[`arsitektur.md`](arsitektur.md) bagian 8.
-
-**Dikunci oleh:** `test/payload_test.dart` grup `routeFromMessage` (4 test) dan
-`idFromMessage` (3 test).
-
-## `lib/messaging/push_service.dart`
-
-```dart
-const String kNotificationSoundResource = 'campus_notif';
-const AndroidNotificationChannel kAnnouncementChannel;
-const String kCampusTopic = 'pengumuman-kampus';
-
-class PushService {
-  PushService({FlutterLocalNotificationsPlugin? local, FirebaseMessaging? messaging});
-  String? pendingDeepLink;
-  Future<void> initLocalNotifications();
-  Future<bool> requestPermission();
-  Future<void> initFcmToken({required Future<void> Function(String token) onToken});
-  Future<void> subscribeCampusTopic();
-  Future<void> unsubscribeCampusTopic();
-  Future<void> listenMessages({
-    required void Function(String route) onRoute,
-    required Future<void> Function(AppNotification notification) onNotification,
-    required Future<void> Function(String? messageId, String route) onOpened,
-  });
-  Future<void> showLocalNotification({
-    required String title, required String body, required String route,
-  });
-  String? consumePendingDeepLink();
-  static String sanitizeRoute(String? route);
-  static String get platformName;
-}
-```
-
-| Anggota | Perilaku |
-|---|---|
-| `kNotificationSoundResource` | `campus_notif` → `android/app/src/main/res/raw/campus_notif.wav` |
-| `kAnnouncementChannel` | id `pengumuman_v2`, nama `Pengumuman Kampus`, `Importance.high`, `playSound: true`, `sound: UriAndroidNotificationSound('campus_notif')`, `showBadge: true` |
-| `initLocalNotifications()` | Idempoten (`_localReady`); ikon Android `@mipmap/ic_launcher`; iOS tidak meminta izin (dipusatkan di `requestPermission`); membuat channel eksplisit; ketukan → `sanitizeRoute(payload)` → `_onRoute` atau `pendingDeepLink` |
-| `requestPermission()` | `alert`/`badge`/`sound` = `true`; `true` bila status `authorized` **atau** `provisional` |
-| `initFcmToken()` | `getToken()` (deprecated, di-`ignore`) → `onToken`; lalu `onTokenRefresh.listen` → `onToken` |
-| `subscribeCampusTopic()` | `subscribeToTopic('pengumuman-kampus')` |
-| `listenMessages()` | Simpan `_onRoute`; `onMessage` → `onNotification` + banner; `onMessageOpenedApp` dan `getInitialMessage` → `onOpened(messageId, route)` |
-| `showLocalNotification()` | Id = `epochMs % 100000`; `payload` = route; Android importance/priority high, suara kustom, getar, `channelShowBadge` |
-| `sanitizeRoute()` | `null`/kosong → `/`; garis miring ditambahkan bila hilang |
-| `platformName` | `web` bila `kIsWeb`, selain itu `defaultTargetPlatform.name` |
-
-**Invarian:** kelas ini tidak meng-import Riverpod maupun `pages/`; navigasi
-hanya lewat callback. `getToken`/`onTokenRefresh` deprecated tetapi
-dipertahankan — alasannya di komentar `initFcmToken` dan
-[`ai-challenge.md`](ai-challenge.md).
-
-**Kenapa `pengumuman_v2`:** setelan channel Android bersifat *immutable*. Pada
-perangkat yang sudah pernah membuat channel `pengumuman`, menambah suara kustom
-tanpa mengganti id tidak berefek. Payload backend wajib ikut memakai
-`channel_id: pengumuman_v2` (lihat `tools/send_fcm.py`).
-
-## `lib/providers/auth_provider.dart`
-
-```dart
-final Provider<TokenStore> tokenStoreProvider;
-final Provider<AuthRepository> authRepositoryProvider;
-final Provider<Dio> apiClientProvider;
-final AsyncNotifierProvider<AuthNotifier, AuthSession?> authStateProvider;
-
-class AuthNotifier extends AsyncNotifier<AuthSession?> {
-  Future<AuthSession?> build();
-  Future<void> login(String email, String password);
-  Future<bool> refreshSession();
-  Future<void> logout();
-  Future<void> forceLogout();
-}
-```
-
-| Method | Perilaku | State akhir |
+| Fake | Berkas | Isi |
 |---|---|---|
-| `build()` | Baca access; kosong → `null`. Refresh kosong → `clear()` + `null` (sesi setengah jadi dibersihkan). Selain itu → `AuthSession` | `AsyncData` |
-| `login()` | `AsyncLoading` → `AsyncValue.guard` (repository → `save`) | `AsyncData(session)` / `AsyncError` |
-| `refreshSession()` | Tanpa refresh → `forceLogout`, `false`. Gagal → `forceLogout`, `false`. Sukses → simpan access baru, email dipertahankan, `true` | `AsyncData` |
-| `logout()` | `_clearSession()` (token + `signOut()` Firebase bila didukung) | `AsyncData(null)` |
-| `forceLogout()` | `_clearSession()` tanpa melempar | `AsyncData(null)` |
+| `FakeSessionRepository` | `auth_test.dart`, `api_client_test.dart`, `notification_test.dart` | `SessionRepository` berbasis memori + `clearCount` |
+| `InMemoryKeyValueStore` | `notification_test.dart`, `push_test.dart` (dari `lib/data/datasources/`) | Penyimpanan kunci-nilai di memori |
+| `RecordingBadge` | `notification_test.dart` | Merekam setiap angka badge tanpa platform channel |
+| `FakePushMessaging` | `push_test.dart` | `PushMessaging` tanpa Firebase: stream yang dipicu manual, penghitung `prepare`/`subscribe`/`unsubscribe`, penampung banner |
+| `FakeDeviceRepository` | `push_test.dart` | Merekam `register`/`unregister`; bisa menolak registrasi |
+| `ScriptedAdapter` | `api_client_test.dart` | `HttpClientAdapter` yang mengembalikan 401 untuk token lama dan 200 untuk token baru |
+| `DeadRefreshRepository` / `_RenewingRepository` | `api_client_test.dart` | `AuthRepository` yang selalu gagal / selalu berhasil refresh |
 
-`firebaseReadyProvider` (default `false`) di-override di `main()` dengan hasil
-`bootstrapFirebase()`; `authRepositoryProvider` memakainya untuk memilih
-`FirebaseAuthRepository` atau `MockAuthRepository`.
+Pola umum: **override provider di `dependencies.dart`**, bukan me-*subclass*
+kelas konkret. Contoh lengkap ada di
+[`panduan-pengembangan.md`](panduan-pengembangan.md) bagian 8.1.
 
-**Dikunci oleh:** `test/auth_test.dart` (8 test).
+## 6. Invarian lintas berkas
 
-## `lib/providers/app_router.dart`
-
-```dart
-final Provider<GoRouter> appRouterProvider;
-class _AuthRefresh extends ChangeNotifier; // privat
-```
-
-| Rute | Widget |
+| Invarian | Dikunci oleh |
 |---|---|
-| `/login` | `LoginPage` |
-| `/` | `HomePage` |
-| `/notifikasi` | `NotificationsPage` |
-| `/pengumuman/:id` | `AnnouncementPage(id: state.pathParameters['id'] ?? '')` |
-
-`initialLocation: Routes.home`, `refreshListenable: _AuthRefresh`. Guard
-mengembalikan `null` selama `auth.isLoading && !auth.hasValue`.
-
-## `lib/providers/push_providers.dart`
-
-```dart
-final Provider<PushService> pushServiceProvider;
-final Provider<DeviceRepository> deviceRepositoryProvider;
-final NotifierProvider<PushController, PushState> pushProvider;
-
-class PushState {
-  const PushState({
-    this.started = false, this.permissionGranted = false, this.token,
-    this.registeredOnBackend = false, this.subscribedTopic = false,
-    this.lastRoute, this.note,
-  });
-  String get maskedToken;
-  PushState copyWith({...});
-}
-
-class PushController extends Notifier<PushState> {
-  PushState build();
-  Future<void> start({required bool firebaseReady, String? firebaseNote});
-  Future<void> sendTestNotification();
-  Future<void> toggleTopic(bool subscribe);
-  Future<void> detach();
-}
-```
-
-| Method | Urutan kerja |
-|---|---|
-| `start()` | Kembali bila `state.started`; bila `!firebaseReady` → `note` saja dan berhenti; `initLocalNotifications` → `requestPermission` → `initFcmToken(_registerToken)` → `subscribeCampusTopic` → `listenMessages(onRoute: _go, onNotification: _record, onOpened: _openFromNotification)` → `consumePendingDeepLink` |
-| `sendTestNotification()` | Catat ke kotak masuk **dan** tampilkan banner lokal "Jadwal kuliah berubah" → `/pengumuman/3` |
-| `toggleTopic(bool)` | `subscribe` / `unsubscribe` lalu perbarui `subscribedTopic` |
-| `detach()` | `unregisterDevice(token)` → `unsubscribeCampusTopic()` → kosongkan `token`, `registeredOnBackend`, `subscribedTopic`, `lastRoute`, `note`, dan set `started = false`. Dipanggil **sebelum** `logout()` karena `DELETE /devices` butuh header `Authorization` |
-| `_record()` | `notificationsProvider.add(...)` — menandai notifikasi belum dibaca |
-| `_openFromNotification()` | `markRead(messageId)` lalu `_go(route)`; diketuk berarti sudah dibaca |
-
-**Catatan `copyWith`:** `token`, `lastRoute`, dan `note` memakai sentinel
-`_unset` sebagai nilai default, sehingga `copyWith(note: null)` berarti
-**mengosongkan**, sedangkan parameter yang tidak disebut mempertahankan nilai
-lama. Sebelumnya `null` dianggap "pertahankan", dan akibatnya catatan error
-(`POST /devices belum tersedia`) tidak pernah hilang meski pelaporan berikutnya
-berhasil.
-
-**Dikunci oleh:** `test/push_test.dart` (9 test: 5 untuk `PushState` termasuk
-`maskedToken`, 4 untuk `PushController` — `start`, catatan error yang hilang
-setelah pelaporan berhasil, `detach`, dan `detach` tanpa token). Logika kotak
-masuk yang dipanggilnya dikunci di `test/notification_test.dart`, sedangkan
-perilaku runtime terlihat di `screenshots/01-home-status-fcm.png`.
-
-## `lib/providers/notification_providers.dart`
-
-```dart
-final Provider<KeyValueStore> keyValueStoreProvider;
-final Provider<NotificationStore> notificationStoreProvider;
-final Provider<BadgeService> badgeServiceProvider;
-final NotifierProvider<NotificationCenter, List<AppNotification>> notificationsProvider;
-
-class NotificationCenter extends Notifier<List<AppNotification>> {
-  int get unreadCount;
-  Future<void> reload();
-  Future<void> add(AppNotification notification);
-  Future<void> markRead(String id);
-  Future<void> markAllRead();
-}
-```
-
-| Anggota | Perilaku |
-|---|---|
-| `build()` | `[]` lalu `reload()` dijadwalkan lewat microtask |
-| `reload()` | Baca ulang penyimpanan (entri dari handler background) |
-| `add()` | Catat sebagai belum dibaca + sinkron badge |
-| `markRead()` | Hapus entri + sinkron badge |
-| `markAllRead()` | Kosongkan daftar + badge 0 |
-| `unreadCount` | `state.length` |
-
-Semua operasi menelan kegagalan penyimpanan agar UI tidak crash, dan penanda
-`_disposed` mencegah penulisan state setelah provider dibuang.
-**Dikunci oleh:** grup `NotificationCenter` (4 test) + widget test "dibaca →
-hilang".
-
-## `lib/pages/login_page.dart`
-
-```dart
-class LoginPage extends ConsumerStatefulWidget
-```
-
-| Elemen | Detail |
-|---|---|
-| Field | Email (`Icons.alternate_email`), kata sandi (`Icons.lock_outline`) dengan tombol tampil/sembunyi |
-| Validasi email | Kosong → "Email wajib diisi"; tanpa `@` → "Format email tidak valid" |
-| Validasi sandi | Kosong → "Kata sandi wajib diisi"; < 6 → "Minimal 6 karakter" |
-| Aksi | `FilledButton` "Masuk"; spinner saat `_busy`; `onFieldSubmitted` juga mengirim |
-| Error | Kotak `errorContainer` dari `AuthException.message` atau `friendlyApiMessage()` |
-| Navigasi | **Tidak ada** — guard `GoRouter` yang memindahkan |
-| Catatan UI | Saat Firebase siap: "Masuk memakai akun Firebase Authentication…"; saat belum: "Mode praktikum: Firebase belum dikonfigurasi, autentikasi memakai mock…" (membaca `firebaseReadyProvider`) |
-
-**Invarian:** `_busy` mencegah submit ganda; `if (!mounted) return;` sebelum
-`setState` setelah `await`.
-
-## `lib/pages/home_page.dart`
-
-```dart
-class HomePage extends ConsumerWidget
-class _SessionView extends ConsumerWidget   // privat
-class _PushCard extends ConsumerWidget     // privat
-class _NotificationBell extends ConsumerWidget // privat
-class _Row extends StatelessWidget         // privat
-class _ErrorView extends StatelessWidget   // privat
-```
-
-| Bagian | Isi |
-|---|---|
-| `AppBar` | Judul "Campus Notify", lonceng (`_NotificationBell`) → `/notifikasi`, tombol `Icons.logout` → `PushController.detach()` lalu `logout()` |
-| `_NotificationBell` | `Badge` Material 3 dengan angka `notificationsProvider.length`; label tersembunyi saat 0 |
-| Loading | `CircularProgressIndicator` saat `isLoading && !hasValue` |
-| Error | `_ErrorView` + tombol "Coba lagi" → `ref.invalidate(authStateProvider)` |
-| Kartu "Sesi aktif" | Email, access token **terpotong**, catatan "disimpan di flutter_secure_storage" |
-| Aksi 1 | "Jadwal kuliah berubah" → `context.go(Routes.announcement('3'))` |
-| Aksi 2 | "Uji refresh token" → `refreshSession()`; SnackBar sukses (token terpotong) atau gagal |
-| Kartu "Status notifikasi" | Token terpotong, izin, topik, laporan backend, deep link terakhir, `note` (merah), tombol "Tampilkan notifikasi uji" |
-| Jaring pengaman | Bila `session == null` → teks "Belum ada sesi." |
-
-**Invarian:** token utuh tidak pernah dirender; gunakan `session.maskedAccess`
-dan `push.maskedToken`. Cek `context.mounted` setelah `await` sebelum memakai
-`ScaffoldMessenger`/`context`.
-
-## `lib/pages/notifications_page.dart`
-
-`ConsumerStatefulWidget`. AppBar menampilkan `Notifikasi (n)`, aksi `done_all`
-(tandai semua dibaca), dan tombol kembali (`pop` bila memungkinkan, jika tidak ke
-`/`). Isi: `_EmptyState` atau `ListView.separated` berisi `_NotificationTile`.
-
-| Aksi | Efek |
-|---|---|
-| Halaman dibuka | `initState` → `reload()` (menyusul entri dari handler background) |
-| Mengetuk tile | `markRead(id)` → entri hilang → `context.push(item.route)` |
-| Tarik ke bawah | `reload()` dari penyimpanan |
-| `done_all` | `markAllRead()` → daftar & badge jadi 0 |
-
-## `lib/pages/announcement_page.dart`
-
-```dart
-class AnnouncementPage extends StatelessWidget
-  const AnnouncementPage({super.key, required String id})
-```
-
-| Aspek | Detail |
-|---|---|
-| Sumber `id` | `state.pathParameters['id']` dari router, bukan state halaman lain |
-| Isi | `Chip` "id: <id>", judul, isi pengumuman contoh, kartu penjelasan deep link |
-| Tombol kembali | `context.canPop()` → `pop()`, selain itu `go('/')` (penting untuk kasus terminated, saat tidak ada riwayat) |
-
-## `test/`
-
-| Berkas | Jumlah test | Cakupan |
-|---|---|---|
-| `test/payload_test.dart` | 11 | `routeFromMessage` (4), `idFromMessage` (3), `sanitizeRoute` (2), `maskSecret` (2) |
-| `test/api_client_test.dart` | 3 | 401 → refresh → retry sukses; refresh mati → sesi dibersihkan tanpa retry; refresh tidak tersimpan → langsung bersihkan |
-| `test/auth_test.dart` | 8 | Guard route, sesi tersimpan, sesi setengah jadi, login valid/tidak valid, refresh sukses/ditolak, `maskedAccess` |
-| `test/notification_test.dart` | 24 | `AppNotification` (5), `NotificationStore` (6), `NotificationCenter` + badge (5), `relativeTime` (4), `authMessageFor` (3), widget test "dibaca → hilang" (1) |
-| `test/push_test.dart` | 9 | `PushState.copyWith` (5, termasuk `null` yang mengosongkan), `PushController.start` / `detach` (4) |
-| **Total** | **55** | `flutter test` → `All tests passed!` |
-
-### Alat bantu test yang bisa dipakai ulang
-
-| Alat | Berkas | Fungsi |
-|---|---|---|
-| `FakeTokenStore` | `test/auth_test.dart`, `test/notification_test.dart` | `TokenStore` berbasis memori + `clearCount` |
-| `MemoryTokenStore` | `test/api_client_test.dart` | Sama, tanpa email |
-| `ScriptedAdapter` | `test/api_client_test.dart` | `HttpClientAdapter` palsu: 401 untuk token lama, 200 untuk token baru; merekam header |
-| `DeadRefreshRepository` / `_RenewingRepository` | `test/api_client_test.dart` | `AuthRepository` yang selalu gagal / selalu memberi access baru |
-| `RecordingBadgeService` | `test/notification_test.dart` | Merekam angka badge tanpa platform channel |
-| `FakePushService` | `test/push_test.dart` | `PushService` tanpa Firebase: merekam `subscribe`/`unsubscribe` dan menyimpan callback `onToken` agar test bisa meniru `onTokenRefresh` |
-| `FakeDeviceRepository` | `test/push_test.dart` | `DeviceRepository` tanpa jaringan: merekam token yang didaftarkan/dilepas dan bisa dibuat gagal |
-| `InMemoryKeyValueStore` | `lib/data/notification_store.dart` | Penyimpanan kotak masuk di memori |
-
-Pola penting: test widget memakai
-`CampusNotifyApp(firebase: FirebaseBootstrap.notConfigured('test'))` sehingga
-`PushController` berhenti sebelum menyentuh platform channel Firebase, dan
-meng-override `keyValueStoreProvider` + `badgeServiceProvider` agar tidak ada
-plugin yang dipanggil.
-
-## `tools/send_fcm.py`
-
-```text
-python tools/send_fcm.py [--id N] [--token FCM] [--data-only]
-```
-
-| Argumen | Default | Fungsi |
-|---|---|---|
-| `--id` | `3` | Mengisi `data.route = /pengumuman/<id>` dan `data.id` |
-| `--token` | – | Kirim ke satu perangkat; tanpa ini dikirim ke topik `pengumuman-kampus` |
-| `--data-only` | mati | Menghilangkan blok `notification` (menguji jalur `data`) |
-
-Padanan PowerShell `tools/send_fcm.ps1` memakai parameter `-Id`, `-Token`,
-`-DataOnly` dan mengirim payload yang sama. Skrip ini menandatangani JWT RS256
-lewat `openssl` lalu memanggil FCM dengan `curl`, sehingga tidak butuh paket
-Python. Berguna di Windows yang belum memasang `requests`/`google-auth`.
-
-Prasyarat: `.secrets/service-account.json` (tidak masuk version control),
-paket Python `requests` dan `google-auth`. Skrip mencetak project, target, data,
-channel, status HTTP, lalu keluar dengan kode 1 bila status ≠ 200.
-`CHANNEL_ID` di skrip ini **wajib** sama dengan `kAnnouncementChannel.id`
-(`pengumuman_v2`), kalau tidak Android memakai channel default tanpa suara
-kustom.
-
-## `tools/make_app_icon.ps1`
-
-```text
-powershell -ExecutionPolicy Bypass -File tools/make_app_icon.ps1
-dart run flutter_launcher_icons
-```
-
-Menghasilkan `assets/icon/app_icon.png` (ikon penuh, latar gradasi hijau) dan
-`assets/icon/app_icon_foreground.png` (lapisan depan adaptive icon, transparan).
-Keduanya dirujuk blok `flutter_launcher_icons` di `pubspec.yaml`.
-
-## Konstanta dan nilai tetap
-
-| Nama | Nilai | Berkas |
-|---|---|---|
-| `kApiBaseUrl` | `https://example-campus-api.test` | `data/api_client.dart` |
-| `kCampusTopic` | `pengumuman-kampus` | `messaging/push_service.dart` |
-| `kAnnouncementChannel.id` | `pengumuman_v2` | `messaging/push_service.dart` |
-| `kAnnouncementChannel.name` | `Pengumuman Kampus` | `messaging/push_service.dart` |
-| `kNotificationSoundResource` | `campus_notif` | `messaging/push_service.dart` |
-| `NotificationStore.storageKey` | `campus_notif.inbox` | `data/notification_store.dart` |
-| `NotificationStore.maxEntries` | `50` | `data/notification_store.dart` |
-| `kOpaqueRefreshToken` | `firebase:getIdToken` | `data/auth_repository.dart` |
-| `Routes.login` | `/login` | `routes.dart` |
-| `Routes.home` | `/` | `routes.dart` |
-| `Routes.notifications` | `/notifikasi` | `routes.dart` |
-| `Routes.announcementPattern` | `/pengumuman/:id` | `routes.dart` |
-| Warna seed tema | `0xFF0B6E4F` | `main.dart` |
-| Application ID | `com.horoboy.campusnotif` | `android/app/build.gradle.kts` |
-| Timeout Dio | 10 s (connect, receive) | `data/api_client.dart` |
-
-## Invarian proyek (checklist review)
-
-1. Token hanya di `flutter_secure_storage`; `shared_preferences` khusus kotak
-   masuk notifikasi (bukan rahasia).
-2. Tidak ada `print`/`debugPrint` yang memuat token atau payload penuh.
-3. Tidak ada string path literal; selalu lewat `Routes`.
-4. Semua token yang tampil melewati `maskSecret()`.
-5. Handler background tetap fungsi top-level `@pragma('vm:entry-point')` tanpa
-   `BuildContext`/Riverpod.
-6. Navigasi dari notifikasi lewat `router.go()` pada router yang sudah ada,
-   bukan `Navigator.push` atau router baru.
-7. `bootstrapFirebase()` tetap tidak melempar.
-8. Angka badge selalu berasal dari `notificationsProvider.length` — tidak ada
-   penghitung terpisah yang bisa menyimpang.
-9. Kegagalan platform (badge, penyimpanan, `signOut`) tidak boleh membuat
-   aplikasi crash; semuanya dibungkus `try/catch` bertipe `on Object`.
-10. `flutter analyze` bersih dan `flutter test` hijau sebelum commit.
-
+| Token tidak pernah dirender utuh (`maskSecret` / `maskedToken`) | `test/payload_test.dart`, `test/push_test.dart`, `test/auth_test.dart` |
+| `copyWith(note: null)` mengosongkan catatan | `test/push_test.dart` |
+| Logout melepas listener FCM dan mengosongkan status | `test/push_test.dart` (`detach`) |
+| `DELETE /devices` dijalankan sebelum sesi dihapus | `LogoutUseCase` + urutan di `home_page.dart` |
+| Sesi setengah jadi dibersihkan, bukan dipakai | `test/auth_test.dart` |
+| Satu request hanya diulang sekali setelah refresh | `test/api_client_test.dart` |
+| Kotak masuk: dedupe, batas 50, data rusak tidak crash | `test/notification_test.dart` |
+| Badge = jumlah notifikasi belum dibaca | `test/notification_test.dart`, `test/push_test.dart` |
+| Tidak ada `presentation/` yang meng-import SDK | ditinjau manual + `flutter analyze` |

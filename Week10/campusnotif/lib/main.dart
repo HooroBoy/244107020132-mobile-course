@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'data/auth_repository.dart';
-import 'messaging/firebase_bootstrap.dart';
-import 'providers/app_router.dart';
-import 'providers/auth_provider.dart';
-import 'providers/notification_providers.dart';
-import 'providers/push_providers.dart';
+import 'data/messaging/firebase_bootstrap.dart';
+import 'domain/entities/auth_session.dart';
+import 'presentation/providers/app_router.dart';
+import 'presentation/providers/auth/auth_controller.dart';
+import 'presentation/providers/dependencies.dart';
+import 'presentation/providers/notifications/notification_controller.dart';
+import 'presentation/providers/push/push_controller.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -53,11 +54,11 @@ class _CampusNotifyAppState extends ConsumerState<CampusNotifyApp> {
     // kotak masuk dibaca ulang setiap aplikasi kembali aktif.
     _lifecycle = AppLifecycleListener(onResume: _reloadInbox);
 
-    // Logout melepas perangkat dari backend (lihat `PushController.detach`),
-    // jadi sesi berikutnya harus memasang FCM lagi. `start()` menjaga dirinya
-    // sendiri agar tidak berjalan dua kali.
+    // Logout melepas perangkat dari backend (lihat `LogoutUseCase`), jadi sesi
+    // berikutnya harus memasang FCM lagi. `start()` menjaga dirinya sendiri agar
+    // tidak berjalan dua kali.
     _authListener = ref.listenManual<AsyncValue<AuthSession?>>(
-      authStateProvider,
+      authControllerProvider,
       (previous, next) {
         if (previous?.value == null && next.value != null && _frameReady) {
           // Ditunda agar perubahan state push tidak terjadi di tengah

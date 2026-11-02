@@ -8,7 +8,7 @@ Indeks seluruh dokumentasi proyek. Mulai dari sini, lalu pilih sesuai kebutuhan.
 |---|---|---|
 | [`../README.md`](../README.md) | Dosen / penilai / pembaca pertama | Ringkasan proyek, fitur, stack, cara menjalankan, bukti pengujian tiga app state |
 | [`arsitektur.md`](arsitektur.md) | Developer yang baru bergabung | Peta lapisan, graf dependency provider, alur login / refresh 401 / FCM / deep link, keputusan desain |
-| [`referensi-kode.md`](referensi-kode.md) | Developer yang mengubah kode | Kontrak setiap berkas di `lib/`: kelas, fungsi, konstanta, invariant, dan test yang mengunci perilakunya |
+| [`referensi-kode.md`](referensi-kode.md) | Developer yang mengubah kode | Kontrak setiap berkas di `lib/` per lapisan (`domain` → `data` → `presentation`): tanda tangan, invariant, dan test yang mengunci perilakunya |
 | [`panduan-pengembangan.md`](panduan-pengembangan.md) | Developer | Prasyarat, perintah harian, konfigurasi Firebase, konvensi kode, resep perubahan, cara menulis test, troubleshooting |
 | [`panduan-pengguna.md`](panduan-pengguna.md) | Pengguna aplikasi / penguji manual | Alur layar login → beranda, arti setiap status di kartu notifikasi, lonceng & daftar notifikasi, suara, perilaku notifikasi di tiga app state |
 | [`uji-fcm.md`](uji-fcm.md) | Penguji | Prosedur uji tiga app state via ADB, verifikasi suara/daftar/badge/ikon, dan dua jebakan Firebase Console |
@@ -31,8 +31,9 @@ menukar refresh token saat menerima 401, notifikasi FCM yang membawa deep link
 ke `/pengumuman/:id` pada state foreground, background, dan terminated, kotak
 masuk notifikasi yang mengosongkan entri begitu dibaca, badge angka pada ikon
 aplikasi, serta suara notifikasi kustom dari berkas aset. Seluruh kode berada di
-`lib/` dengan pembagian `data/` (sumber data), `providers/` (state & dependency
-injection), `messaging/` (FCM), dan `pages/` (UI).
+`lib/` dengan pembagian layer-first: `domain/` (entity, kontrak repository, use
+case), `data/` (implementasi Firebase/Dio/secure storage/FCM), dan
+`presentation/` (controller Riverpod, composition root, router, halaman).
 
 ## Status verifikasi
 
@@ -40,13 +41,13 @@ Diperiksa ulang pada 2 November 2026 dengan Flutter 3.47.7 / Dart 3.13.5:
 
 ```bash
 flutter analyze            # No issues found! (ran in 3.5s)
-flutter test               # All tests passed! (55 test)
+flutter test               # All tests passed! (62 test)
 flutter build apk --debug  # Built build/app/outputs/flutter-apk/app-debug.apk
 ```
 
-Angka 55 terdiri dari 11 test di `test/payload_test.dart`, 3 di
-`test/api_client_test.dart`, 8 di `test/auth_test.dart`, 9 di
-`test/push_test.dart`, dan 24 di `test/notification_test.dart` (termasuk
+Angka 62 terdiri dari 11 test di `test/payload_test.dart`, 3 di
+`test/api_client_test.dart`, 8 di `test/auth_test.dart`, 14 di
+`test/push_test.dart`, dan 26 di `test/notification_test.dart` (termasuk
 widget test alur "dibaca → hilang").
 
 Build APK diverifikasi memuat `res/raw/campus_notif.wav`, ikon adaptive

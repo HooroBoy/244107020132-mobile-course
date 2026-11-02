@@ -1,0 +1,89 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'messaging/firebase_bootstrap.dart';
+import 'providers/app_router.dart';
+import 'providers/auth_provider.dart';
+import 'providers/notification_providers.dart';
+import 'providers/push_providers.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Firebase diinisialisasi lebih dulu karena FCM butuh instance yang siap.
+  // Bila google-services.json belum ada, aplikasi tetap berjalan tanpa FCM.
+  final FirebaseBootstrap firebase = await bootstrapFirebase();
+
+  runApp(
+    ProviderScope(
+      // Kesiapan Firebase menentukan sumber autentikasi: Firebase Auth bila
+      // siap, mock bila google-services.json belum ada.
+      overrides: [
+        firebaseReadyProvider.overrideWithValue(firebase.ready),
+      ],
+      child: CampusNotifyApp(firebase: firebase),
+    ),
+  );
+}
+
+class CampusNotifyApp extends ConsumerStatefulWidget {
+  const CampusNotifyApp({super.key, required this.firebase});
+
+  final FirebaseBootstrap firebase;
+
+  @override
+  ConsumerState<CampusNotifyApp> createState() => _CampusNotifyAppState();
+}
+
+class _CampusNotifyAppState extends ConsumerState<CampusNotifyApp> {
+  late final AppLifecycleListener _lifecycle;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Saat aplikasi di background, handler FCM menulis langsung ke penyimpanan
+    // (isolate terpisah), sehingga daftar di memori menjadi basi: lonceng dan
+    // badge ikon tidak ikut bertambah sampai aplikasi dibuka ulang. Karena itu
+    // kotak masuk dibaca ulang setiap aplikasi kembali aktif.
+    _lifecycle = AppLifecycleListener(onResume: _reloadInbox);
+
+    // Ditunda satu frame: router harus sudah terpasang sebelum
+    // getInitialMessage() mencoba bernavigasi.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(pushProvider.notifier).start(
+            firebaseReady: widget.firebase.ready,
+            firebaseNote: widget.firebase.reason,
+          );
+    });
+  }
+
+  void _reloadInbox() {
+    if (!mounted) return;
+    ref.read(notificationsProvider.notifier).reload();
+  }
+
+  @override
+  void dispose() {
+    _lifecycle.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp.router(
+      title: 'Campus Notify',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0B6E4F)),
+      ),
+      darkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF0B6E4F),
+          brightness: Brightness.dark,
+        ),
+      ),
+      routerConfig: ref.watch(appRouterProvider),
+    );
+  }
+}

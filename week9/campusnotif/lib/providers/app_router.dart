@@ -6,6 +6,7 @@ import '../data/auth_repository.dart';
 import '../pages/announcement_page.dart';
 import '../pages/home_page.dart';
 import '../pages/login_page.dart';
+import '../pages/notifications_page.dart';
 import '../routes.dart';
 import 'auth_provider.dart';
 
@@ -40,6 +41,10 @@ final Provider<GoRouter> appRouterProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: Routes.home,
         builder: (context, state) => const HomePage(),
+      ),
+      GoRoute(
+        path: Routes.notifications,
+        builder: (context, state) => const NotificationsPage(),
       ),
       GoRoute(
         path: Routes.announcementPattern,

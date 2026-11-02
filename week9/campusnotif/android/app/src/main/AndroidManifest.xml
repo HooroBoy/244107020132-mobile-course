@@ -1,8 +1,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Notifikasi runtime Android 13+ (API 33). Tanpa deklarasi ini,
+         permintaan izin di PushService.requestPermission() tidak akan
+         menampilkan dialog dan notifikasi tidak pernah muncul. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Suara dan getar notifikasi. -->
+    <uses-permission android:name="android.permission.VIBRATE"/>
+    <!-- FCM butuh akses jaringan; sudah diberikan Flutter, ditulis eksplisit
+         agar jelas saat membaca manifest. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
     <application
-        android:label="campusnotif"
+        android:label="Campus Notify"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

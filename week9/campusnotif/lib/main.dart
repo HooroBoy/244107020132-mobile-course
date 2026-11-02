@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'messaging/firebase_bootstrap.dart';
 import 'providers/app_router.dart';
+import 'providers/auth_provider.dart';
+import 'providers/notification_providers.dart';
 import 'providers/push_providers.dart';
 
 Future<void> main() async {
@@ -14,6 +16,11 @@ Future<void> main() async {
 
   runApp(
     ProviderScope(
+      // Kesiapan Firebase menentukan sumber autentikasi: Firebase Auth bila
+      // siap, mock bila google-services.json belum ada.
+      overrides: [
+        firebaseReadyProvider.overrideWithValue(firebase.ready),
+      ],
       child: CampusNotifyApp(firebase: firebase),
     ),
   );
@@ -29,9 +36,18 @@ class CampusNotifyApp extends ConsumerStatefulWidget {
 }
 
 class _CampusNotifyAppState extends ConsumerState<CampusNotifyApp> {
+  late final AppLifecycleListener _lifecycle;
+
   @override
   void initState() {
     super.initState();
+
+    // Saat aplikasi di background, handler FCM menulis langsung ke penyimpanan
+    // (isolate terpisah), sehingga daftar di memori menjadi basi: lonceng dan
+    // badge ikon tidak ikut bertambah sampai aplikasi dibuka ulang. Karena itu
+    // kotak masuk dibaca ulang setiap aplikasi kembali aktif.
+    _lifecycle = AppLifecycleListener(onResume: _reloadInbox);
+
     // Ditunda satu frame: router harus sudah terpasang sebelum
     // getInitialMessage() mencoba bernavigasi.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -40,6 +56,17 @@ class _CampusNotifyAppState extends ConsumerState<CampusNotifyApp> {
             firebaseNote: widget.firebase.reason,
           );
     });
+  }
+
+  void _reloadInbox() {
+    if (!mounted) return;
+    ref.read(notificationsProvider.notifier).reload();
+  }
+
+  @override
+  void dispose() {
+    _lifecycle.dispose();
+    super.dispose();
   }
 
   @override

@@ -30,7 +30,10 @@ ROOT = Path(__file__).resolve().parent.parent
 CREDENTIALS = ROOT / ".secrets" / "service-account.json"
 
 TOPIC = "pengumuman-kampus"
-CHANNEL_ID = "pengumuman"
+# Harus sama dengan kAnnouncementChannel.id di lib/messaging/push_service.dart.
+# Akhiran _v2 dipakai karena setelan kanal Android tidak bisa diubah setelah
+# dibuat: kanal lama "pengumuman" tetap memakai suara default.
+CHANNEL_ID = "pengumuman_v2"
 
 
 def access_token() -> tuple[str, str]:

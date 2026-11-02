@@ -1,6 +1,11 @@
+import 'dart:ui' show DartPluginRegistrant;
+
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+
+import '../data/notification_store.dart';
+import 'payload.dart';
 
 /// Handler pesan saat aplikasi di background/terminated.
 ///
@@ -12,8 +17,30 @@ import 'package:flutter/foundation.dart';
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // Isolate ini punya instance Firebase sendiri.
   await Firebase.initializeApp();
+
   // Hanya id pesan yang dicatat. Token dan isi payload tidak pernah di-log.
   debugPrint('[FCM] background message ${message.messageId ?? '-'}');
+
+  // Notifikasi yang masuk saat aplikasi tidak berjalan tetap dicatat ke kotak
+  // masuk, supaya muncul di daftar ketika aplikasi dibuka. Tidak boleh
+  // menyentuh Riverpod/router, jadi penyimpanan dipakai langsung.
+  try {
+    // Plugin (shared_preferences) perlu registrant di isolate terpisah.
+    DartPluginRegistrant.ensureInitialized();
+
+    await NotificationStore(PrefsKeyValueStore()).append(
+      AppNotification.fromMessage(
+        messageId: message.messageId,
+        title: message.notification?.title ?? 'Pengumuman',
+        body: message.notification?.body ?? '',
+        route: routeFromMessage(message.data),
+      ),
+    );
+  } on Object catch (error) {
+    // Kegagalan mencatat tidak boleh menggagalkan handler: notifikasi tetap
+    // ditampilkan sistem. Hanya jenis error yang dicatat, bukan isi pesan.
+    debugPrint('[FCM] gagal mencatat notifikasi: ${error.runtimeType}');
+  }
 }
 
 /// Hasil inisialisasi Firebase, dipakai UI untuk menampilkan status apa adanya.

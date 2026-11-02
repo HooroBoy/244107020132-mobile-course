@@ -189,9 +189,14 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     ),
                     const SizedBox(height: 24),
                     Text(
-                      'Mode praktikum: autentikasi masih mock.\n'
-                      'Gunakan email apa pun yang mengandung "@" '
-                      'dan kata sandi minimal 6 karakter.',
+                      ref.watch(firebaseReadyProvider)
+                          ? 'Masuk memakai akun Firebase Authentication.\n'
+                              'Gunakan email dan kata sandi yang sudah '
+                              'terdaftar di Firebase Console.'
+                          : 'Mode praktikum: Firebase belum dikonfigurasi, '
+                              'autentikasi memakai mock.\n'
+                              'Gunakan email apa pun yang mengandung "@" '
+                              'dan kata sandi minimal 6 karakter.',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.onSurfaceVariant,

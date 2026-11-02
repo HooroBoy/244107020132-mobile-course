@@ -5,13 +5,29 @@ import '../data/api_client.dart';
 import '../data/auth_repository.dart';
 import '../data/token_store.dart';
 
+/// Apakah Firebase berhasil diinisialisasi.
+///
+/// Di-override di `main()` dengan hasil `bootstrapFirebase()`. Nilai default
+/// `false` membuat test dan mode tanpa `google-services.json` memakai
+/// [MockAuthRepository], sehingga tidak ada platform channel yang tersentuh.
+final Provider<bool> firebaseReadyProvider = Provider<bool>((ref) => false);
+
 /// Dependency yang bisa di-override saat test (fake store / fake repository).
 final Provider<TokenStore> tokenStoreProvider = Provider<TokenStore>(
   (ref) => TokenStore(),
 );
 
+/// Memilih sumber autentikasi sesuai kesiapan Firebase.
+///
+/// - Firebase siap → [FirebaseAuthRepository] (login sungguhan ke Firebase Auth)
+/// - Firebase tidak siap → [MockAuthRepository] (demo offline, dipakai test)
 final Provider<AuthRepository> authRepositoryProvider = Provider<AuthRepository>(
-  (ref) => const AuthRepository(),
+  (ref) {
+    if (ref.watch(firebaseReadyProvider)) {
+      return FirebaseAuthRepository();
+    }
+    return const MockAuthRepository();
+  },
 );
 
 /// Klien API yang sudah membawa interceptor refresh.
@@ -97,14 +113,33 @@ class AuthNotifier extends AsyncNotifier<AuthSession?> {
   }
 
   Future<void> logout() async {
-    await ref.read(tokenStoreProvider).clear();
+    await _clearSession();
     state = const AsyncData(null);
   }
 
   /// Dipakai interceptor ketika refresh token sudah mati: bersihkan sesi
   /// tanpa melempar exception ke UI.
   Future<void> forceLogout() async {
-    await ref.read(tokenStoreProvider).clear();
+    await _clearSession();
     state = const AsyncData(null);
+  }
+
+  /// Menghapus token lokal **dan** sesi Firebase (bila ada).
+  ///
+  /// Tanpa `signOut()` di Firebase, pengguna akan otomatis login lagi saat
+  /// aplikasi dibuka karena SDK masih menyimpan sesinya sendiri.
+  Future<void> _clearSession() async {
+    await ref.read(tokenStoreProvider).clear();
+
+    final AuthRepository repository = ref.read(authRepositoryProvider);
+    if (repository is SignOutCapable) {
+      try {
+        // Cast eksplisit: `SignOutCapable` bukan subtipe `AuthRepository`,
+        // jadi promosi tipe tidak otomatis terjadi di sini.
+        await (repository as SignOutCapable).signOut();
+      } on Object {
+        // Kegagalan signOut tidak boleh menghalangi logout lokal.
+      }
+    }
   }
 }

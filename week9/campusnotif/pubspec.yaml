@@ -1,5 +1,5 @@
 name: campusnotif
-description: "Campus Notify: autentikasi token aman + Firebase Cloud Messaging dengan deep link."
+description: "Campus Notify: login Firebase, token aman, FCM dengan deep link, kotak masuk notifikasi, badge, dan suara kustom."
 publish_to: 'none'
 version: 0.1.0+1
 
@@ -7,7 +7,9 @@ environment:
   sdk: ^3.13.5
 
 dependencies:
+  app_badge_plus: ^1.3.5
   dio: ^5.11.1
+  firebase_auth: ^7.0.1
   firebase_core: ^5.1.0
   firebase_messaging: ^17.0.1
   flutter:
@@ -16,11 +18,32 @@ dependencies:
   flutter_riverpod: ^3.4.3
   flutter_secure_storage: ^11.2.0
   go_router: ^18.1.1
+  shared_preferences: ^2.5.6
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
+
+  assets:
+    # Suara notifikasi. Berkas yang sama disalin ke
+    # android/app/src/main/res/raw/campus_notif.wav karena Android hanya bisa
+    # memutar suara notifikasi dari resource native, bukan dari aset Flutter.
+    - assets/mixkit-digital-quick-tone-2866.wav
+
+# Ikon aplikasi non-default. Jalankan ulang setelah mengganti berkas sumber:
+#   dart run flutter_launcher_icons
+flutter_launcher_icons:
+  android: "ic_launcher"
+  image_path: "assets/icon/app_icon.png"
+  adaptive_icon_background: "#0B6E4F"
+  adaptive_icon_foreground: "assets/icon/app_icon_foreground.png"
+  # Isi foreground sudah diperkecil ke ~78% oleh tools/make_app_icon.ps1 sehingga
+  # masuk zona aman adaptive icon; inset tambahan akan membuatnya terlalu kecil.
+  adaptive_icon_foreground_inset: 0
+  min_sdk_android: 24
+

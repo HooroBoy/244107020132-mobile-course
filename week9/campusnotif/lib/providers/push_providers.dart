@@ -2,10 +2,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/device_repository.dart';
 import '../data/masking.dart';
+import '../data/notification_store.dart';
 import '../messaging/push_service.dart';
 import '../routes.dart';
 import 'app_router.dart';
 import 'auth_provider.dart';
+import 'notification_providers.dart';
 
 final Provider<PushService> pushServiceProvider = Provider<PushService>(
   (ref) => PushService(),
@@ -102,7 +104,11 @@ class PushController extends Notifier<PushState> {
     await _service.subscribeCampusTopic();
     state = state.copyWith(subscribedTopic: true);
 
-    await _service.listenMessages(onRoute: _go);
+    await _service.listenMessages(
+      onRoute: _go,
+      onNotification: _record,
+      onOpened: _openFromNotification,
+    );
 
     // Notifikasi lokal yang diketuk sebelum handler terpasang.
     final String? pending = _service.consumePendingDeepLink();
@@ -132,13 +138,36 @@ class PushController extends Notifier<PushState> {
     ref.read(appRouterProvider).go(safe);
   }
 
-  /// Notifikasi uji lokal: membuktikan banner foreground + deep link tanpa
-  /// menunggu pengiriman dari Firebase Console.
+  /// Mencatat notifikasi yang masuk ke kotak masuk (status belum dibaca).
+  Future<void> _record(AppNotification notification) =>
+      ref.read(notificationsProvider.notifier).add(notification);
+
+  /// Dipanggil ketika pengguna mengetuk notifikasi dari panel sistem.
+  ///
+  /// Entri dengan id yang sama dihapus karena pengguna sudah membacanya di
+  /// panel notifikasi, lalu aplikasi menavigasi ke rute dari payload.
+  Future<void> _openFromNotification(String? messageId, String route) async {
+    final String id = messageId?.trim() ?? '';
+    if (id.isNotEmpty) {
+      await ref.read(notificationsProvider.notifier).markRead(id);
+    }
+    _go(route);
+  }
+
+  /// Notifikasi uji lokal: membuktikan banner foreground, suara kustom, kotak
+  /// masuk, dan badge tanpa menunggu pengiriman dari Firebase Console.
   Future<void> sendTestNotification() async {
+    const String title = 'Jadwal kuliah berubah';
+    const String body = 'Kelas Mobile pindah ke Ruang A2 jam 13.00';
+    final String route = Routes.announcement('3');
+
+    await _record(
+      AppNotification.fromMessage(title: title, body: body, route: route),
+    );
     await _service.showLocalNotification(
-      title: 'Jadwal kuliah berubah',
-      body: 'Kelas Mobile pindah ke Ruang A2 jam 13.00',
-      route: Routes.announcement('3'),
+      title: title,
+      body: body,
+      route: route,
     );
   }
 

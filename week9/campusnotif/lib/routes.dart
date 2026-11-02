@@ -7,6 +7,9 @@ abstract final class Routes {
   static const String login = '/login';
   static const String home = '/';
 
+  /// Daftar notifikasi yang belum dibaca.
+  static const String notifications = '/notifikasi';
+
   /// Pola rute dengan parameter, dipakai saat mendaftarkan GoRoute.
   static const String announcementPattern = '/pengumuman/:id';
 

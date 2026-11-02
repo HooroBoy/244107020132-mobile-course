@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../data/auth_repository.dart';
 import '../providers/auth_provider.dart';
+import '../providers/notification_providers.dart';
 import '../providers/push_providers.dart';
 import '../routes.dart';
 
@@ -18,6 +19,7 @@ class HomePage extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('Campus Notify'),
         actions: <Widget>[
+          const _NotificationBell(),
           IconButton(
             tooltip: 'Keluar',
             onPressed: () => ref.read(authStateProvider.notifier).logout(),
@@ -216,6 +218,33 @@ class _PushCard extends ConsumerWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Ikon lonceng pada AppBar dengan angka notifikasi yang belum dibaca.
+///
+/// Angka ini sama dengan jumlah entri di halaman `/notifikasi` dan dengan angka
+/// badge pada ikon aplikasi.
+class _NotificationBell extends ConsumerWidget {
+  const _NotificationBell();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final int unread = ref.watch(notificationsProvider).length;
+
+    return IconButton(
+      tooltip: unread == 0 ? 'Notifikasi' : 'Notifikasi ($unread belum dibaca)',
+      // push (bukan go) agar tombol back sistem kembali ke beranda.
+      onPressed: () => context.push(Routes.notifications),
+      icon: Badge(
+        isLabelVisible: unread > 0,
+        // Angka pada badge dikecualikan dari semantik: tanpa ini pembaca layar
+        // hanya membacakan "4", bukan "Notifikasi (4 belum dibaca)". Tooltip
+        // sudah membawa angka yang sama.
+        label: ExcludeSemantics(child: Text('$unread')),
+        child: const Icon(Icons.notifications_outlined),
       ),
     );
   }

@@ -16,6 +16,9 @@ pengumuman, terbukti pada ketiga app state.
   mati, sesi dibersihkan dan pengguna dipaksa login ulang.
 - FCM: izin runtime, `getToken` + `onTokenRefresh` dilaporkan ke `POST /devices`,
   langganan topik `pengumuman-kampus`.
+- Logout melepas perangkat (`DELETE /devices`) dan menghentikan langganan topik
+  **sebelum** token dihapus, agar backend berhenti mengirim notifikasi personal
+  ke perangkat yang sudah keluar; login berikutnya memasang FCM lagi.
 - Notifikasi gabungan `notification` + `data`, klik membuka `/pengumuman/:id`
   pada state foreground, background, dan terminated.
 - **Kotak masuk notifikasi** (`/notifikasi`): notifikasi yang masuk masuk ke
@@ -184,7 +187,7 @@ Bukti status runtime (token terpotong, izin, topik):
 
 ```bash
 flutter analyze   # No issues found!
-flutter test      # All tests passed! (45 test)
+flutter test      # All tests passed! (55 test)
 flutter build apk --debug   # Built build/app/outputs/flutter-apk/app-debug.apk
 ```
 
@@ -194,6 +197,7 @@ flutter build apk --debug   # Built build/app/outputs/flutter-apk/app-debug.apk
 | `test/api_client_test.dart` | 401 → refresh sekali → retry sukses (2 request); refresh mati → 1 request + sesi dibersihkan |
 | `test/payload_test.dart` | `routeFromMessage`, `idFromMessage`, `sanitizeRoute`, `maskSecret` |
 | `test/notification_test.dart` | model notifikasi, `NotificationStore` (dedupe/batas data rusak), `NotificationCenter` + badge, `relativeTime`, `authMessageFor`, dan widget test "notifikasi dibaca → hilang dari daftar" |
+| `test/push_test.dart` | `PushState.copyWith` (termasuk `null` yang mengosongkan `note`/`token`), `maskedToken`, `PushController.start`, dan `detach()` saat logout |
 
 ## Keamanan
 

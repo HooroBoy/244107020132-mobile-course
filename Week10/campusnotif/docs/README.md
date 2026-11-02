@@ -40,13 +40,14 @@ Diperiksa ulang pada 2 November 2026 dengan Flutter 3.47.7 / Dart 3.13.5:
 
 ```bash
 flutter analyze            # No issues found! (ran in 3.5s)
-flutter test               # All tests passed! (46 test)
+flutter test               # All tests passed! (55 test)
 flutter build apk --debug  # Built build/app/outputs/flutter-apk/app-debug.apk
 ```
 
-Angka 46 terdiri dari 11 test di `test/payload_test.dart`, 3 di
-`test/api_client_test.dart`, 8 di `test/auth_test.dart`, dan 24 di
-`test/notification_test.dart` (termasuk widget test alur "dibaca → hilang").
+Angka 55 terdiri dari 11 test di `test/payload_test.dart`, 3 di
+`test/api_client_test.dart`, 8 di `test/auth_test.dart`, 9 di
+`test/push_test.dart`, dan 24 di `test/notification_test.dart` (termasuk
+widget test alur "dibaca → hilang").
 
 Build APK diverifikasi memuat `res/raw/campus_notif.wav`, ikon adaptive
 `mipmap-*/ic_launcher.*`, dan aset suara pada `flutter_assets`. Perilaku runtime

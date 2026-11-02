@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'data/auth_repository.dart';
 import 'messaging/firebase_bootstrap.dart';
 import 'providers/app_router.dart';
 import 'providers/auth_provider.dart';
@@ -37,6 +38,10 @@ class CampusNotifyApp extends ConsumerStatefulWidget {
 
 class _CampusNotifyAppState extends ConsumerState<CampusNotifyApp> {
   late final AppLifecycleListener _lifecycle;
+  late final ProviderSubscription<AsyncValue<AuthSession?>> _authListener;
+
+  /// Router baru siap dipakai bernavigasi setelah frame pertama selesai.
+  bool _frameReady = false;
 
   @override
   void initState() {
@@ -48,14 +53,35 @@ class _CampusNotifyAppState extends ConsumerState<CampusNotifyApp> {
     // kotak masuk dibaca ulang setiap aplikasi kembali aktif.
     _lifecycle = AppLifecycleListener(onResume: _reloadInbox);
 
+    // Logout melepas perangkat dari backend (lihat `PushController.detach`),
+    // jadi sesi berikutnya harus memasang FCM lagi. `start()` menjaga dirinya
+    // sendiri agar tidak berjalan dua kali.
+    _authListener = ref.listenManual<AsyncValue<AuthSession?>>(
+      authStateProvider,
+      (previous, next) {
+        if (previous?.value == null && next.value != null && _frameReady) {
+          // Ditunda agar perubahan state push tidak terjadi di tengah
+          // notifikasi provider auth.
+          Future<void>.microtask(_startPush);
+        }
+      },
+    );
+
     // Ditunda satu frame: router harus sudah terpasang sebelum
-    // getInitialMessage() mencoba bernavigasi.
+    // getInitialMessage() mencoba bernavigasi. Penanda ini juga menahan
+    // `_startPush` dari listener auth yang menyala terlalu dini.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(pushProvider.notifier).start(
-            firebaseReady: widget.firebase.ready,
-            firebaseNote: widget.firebase.reason,
-          );
+      _frameReady = true;
+      _startPush();
     });
+  }
+
+  void _startPush() {
+    if (!mounted) return;
+    ref.read(pushProvider.notifier).start(
+          firebaseReady: widget.firebase.ready,
+          firebaseNote: widget.firebase.reason,
+        );
   }
 
   void _reloadInbox() {
@@ -65,6 +91,7 @@ class _CampusNotifyAppState extends ConsumerState<CampusNotifyApp> {
 
   @override
   void dispose() {
+    _authListener.close();
     _lifecycle.dispose();
     super.dispose();
   }

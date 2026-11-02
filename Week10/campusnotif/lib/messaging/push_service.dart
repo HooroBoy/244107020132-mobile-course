@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -45,10 +47,31 @@ class PushService {
     FlutterLocalNotificationsPlugin? local,
     FirebaseMessaging? messaging,
   })  : _local = local ?? FlutterLocalNotificationsPlugin(),
-        _messaging = messaging ?? FirebaseMessaging.instance;
+        _messagingOverride = messaging;
 
   final FlutterLocalNotificationsPlugin _local;
-  final FirebaseMessaging _messaging;
+
+  /// Disuntik saat test. `null` berarti memakai [FirebaseMessaging.instance].
+  final FirebaseMessaging? _messagingOverride;
+
+  /// Diselesaikan malas, bukan di konstruktor: `FirebaseMessaging.instance`
+  /// memanggil `Firebase.app()` yang melempar bila Firebase belum
+  /// diinisialisasi. Dengan cara ini kelas tetap bisa dibuat (dan diuji) pada
+  /// mode tanpa `google-services.json`.
+  FirebaseMessaging get _messaging =>
+      _messagingOverride ?? FirebaseMessaging.instance;
+
+  /// Langganan `onTokenRefresh`, disimpan agar bisa dibatalkan saat `start()`
+  /// dipanggil ulang setelah login berikutnya.
+  StreamSubscription<String>? _tokenSubscription;
+
+  /// Listener pesan FCM yang sedang aktif.
+  final List<StreamSubscription<RemoteMessage>> _messageSubscriptions =
+      <StreamSubscription<RemoteMessage>>[];
+
+  /// `getInitialMessage()` mengembalikan pesan yang sama bila dipanggil ulang
+  /// dalam satu proses; penanda ini mencegah deep link dibuka dua kali.
+  bool _initialMessageConsumed = false;
 
   /// Route dari ketukan notifikasi yang belum sempat diproses (mis. diketuk
   /// saat aplikasi baru dibuka dari terminated).
@@ -131,10 +154,16 @@ class PushService {
       await onToken(token);
     }
 
+    // Langganan lama dibatalkan lebih dulu: `start()` dipanggil lagi setelah
+    // login berikutnya, dan tanpa ini tiap login menambah satu listener yang
+    // melaporkan token yang sama berulang kali ke backend.
+    await _tokenSubscription?.cancel();
     // ignore: deprecated_member_use
-    _messaging.onTokenRefresh.listen((String refreshed) async {
-      await onToken(refreshed);
-    });
+    _tokenSubscription = _messaging.onTokenRefresh.listen(
+      (String refreshed) async {
+        await onToken(refreshed);
+      },
+    );
   }
 
   /// Berlangganan topik broadcast kampus.
@@ -160,31 +189,54 @@ class PushService {
   }) async {
     _onRoute = onRoute;
 
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
-      final String route = routeFromMessage(message.data);
-      final String title = message.notification?.title ?? 'Pengumuman';
-      final String body = message.notification?.body ?? '';
+    // Sama seperti token: `listenMessages` bisa dipanggil lagi setelah login
+    // berikutnya, jadi listener lama dilepas agar satu pesan tidak menampilkan
+    // dua banner dan tidak tercatat dua kali.
+    await _cancelMessageListeners();
 
-      await onNotification(
-        AppNotification.fromMessage(
-          messageId: message.messageId,
-          title: title,
-          body: body,
-          route: route,
-        ),
-      );
+    _messageSubscriptions.add(
+      FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
+        final String route = routeFromMessage(message.data);
+        final String title = message.notification?.title ?? 'Pengumuman';
+        final String body = message.notification?.body ?? '';
 
-      await showLocalNotification(title: title, body: body, route: route);
-    });
+        await onNotification(
+          AppNotification.fromMessage(
+            messageId: message.messageId,
+            title: title,
+            body: body,
+            route: route,
+          ),
+        );
 
-    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) async {
-      await onOpened(message.messageId, routeFromMessage(message.data));
-    });
+        await showLocalNotification(title: title, body: body, route: route);
+      }),
+    );
 
-    final RemoteMessage? initial = await _messaging.getInitialMessage();
-    if (initial != null) {
-      await onOpened(initial.messageId, routeFromMessage(initial.data));
+    _messageSubscriptions.add(
+      FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) async {
+        await onOpened(message.messageId, routeFromMessage(message.data));
+      }),
+    );
+
+    // Hanya diproses sekali per proses: pesan awal adalah notifikasi yang
+    // membuka aplikasi dari state terminated.
+    if (!_initialMessageConsumed) {
+      final RemoteMessage? initial = await _messaging.getInitialMessage();
+      if (initial != null) {
+        _initialMessageConsumed = true;
+        await onOpened(initial.messageId, routeFromMessage(initial.data));
+      }
     }
+  }
+
+  /// Melepas listener pesan yang sedang aktif.
+  Future<void> _cancelMessageListeners() async {
+    for (final StreamSubscription<RemoteMessage> subscription
+        in _messageSubscriptions) {
+      await subscription.cancel();
+    }
+    _messageSubscriptions.clear();
   }
 
   /// Menampilkan banner lokal. Dipakai untuk foreground, dan juga bisa dipakai

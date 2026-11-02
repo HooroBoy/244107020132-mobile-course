@@ -22,7 +22,15 @@ class HomePage extends ConsumerWidget {
           const _NotificationBell(),
           IconButton(
             tooltip: 'Keluar',
-            onPressed: () => ref.read(authStateProvider.notifier).logout(),
+            onPressed: () async {
+              // Urutan penting: lepas perangkat selagi access token masih ada,
+              // karena `DELETE /devices` memakai header Authorization. Setelah
+              // sesi dihapus, permintaan itu akan ditolak 401.
+              final PushController push = ref.read(pushProvider.notifier);
+              final AuthNotifier auth = ref.read(authStateProvider.notifier);
+              await push.detach();
+              await auth.logout();
+            },
             icon: const Icon(Icons.logout),
           ),
         ],

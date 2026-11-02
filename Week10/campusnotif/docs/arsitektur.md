@@ -217,6 +217,14 @@ Logout menghapus dua hal: token di secure storage **dan** sesi Firebase
 sesinya sendiri saat aplikasi dibuka sehingga pengguna tampak "tidak pernah
 logout".
 
+Sebelum keduanya dihapus, `HomePage` memanggil `PushController.detach()`:
+perangkat dilepas lewat `DELETE /devices` dan langganan topik dihentikan.
+Urutannya penting — `DELETE /devices` memakai header `Authorization` dari
+interceptor, jadi kalau token dibersihkan lebih dulu, permintaan itu ditolak 401
+dan token perangkat tertinggal di backend (pengguna yang sudah logout tetap
+menerima notifikasi). Karena perangkat sudah dilepas, login berikutnya memanggil
+`start()` lagi lewat `ref.listenManual(authStateProvider)` di `main.dart`.
+
 ## 6. Alur 401 → refresh → retry
 
 ```mermaid
@@ -493,6 +501,8 @@ diproses).
 | Banner foreground manual | Mengandalkan sistem | Android tidak menampilkan notifikasi FCM saat aplikasi foreground |
 | Channel dibuat eksplisit | Mengandalkan channel otomatis | Sejak Android 8, `importance` hanya berlaku saat channel dibuat |
 | `POST /devices` gagal = `false`, bukan exception | Melempar error ke UI | Token tetap sah di sisi Firebase; hanya laporan backend yang tertunda |
+| `detach()` dipanggil sebelum `logout()` | Melepas perangkat setelah token dihapus | `DELETE /devices` butuh header `Authorization`; setelah `clear()` permintaan itu 401 dan token perangkat tertinggal di backend |
+| `copyWith` memakai sentinel `_unset` | Menambah parameter `clearNote: bool` | Satu pola untuk semua field nullable; `copyWith(note: null)` langsung berarti "kosongkan" |
 | Mock auth di repository | Hard-code token di provider | Titik ganti ke Firebase Auth jelas dan tidak menyentuh UI |
 
 ## 14. Batasan arsitektur yang diketahui
@@ -502,8 +512,6 @@ diproses).
 | `AuthRepository` mock hanya dipakai bila Firebase belum siap | Tanpa `google-services.json`, login tidak menyentuh Firebase | Letakkan berkas konfigurasi; implementasi Firebase sudah tersedia |
 | `kApiBaseUrl` masih domain contoh | `POST /devices` tidak pernah berhasil; `registeredOnBackend` selalu `false` | Isi base URL backend nyata di `lib/data/api_client.dart` |
 | Refresh token tidak dirotasi | Server dengan rotasi refresh akan menolak token lama pada refresh kedua | Simpan refresh baru yang dikembalikan `auth.refresh()` |
-| `AuthExpiredException` didefinisikan tetapi tidak pernah dilempar | Pesan "Sesi berakhir" hanya muncul dari pemetaan status 401 | Lempar exception ini dari lapisan yang tahu sesi sudah mati, bila diperlukan |
-| `PushState.copyWith` tidak bisa mengosongkan `note` | Catatan error lama bisa bertahan setelah kondisi pulih | Tambahkan penanda `clearNote` atau pakai sentinel value |
 | `TokenStore.clear()` memakai `deleteAll()` | Menghapus semua kunci milik plugin, bukan hanya tiga kunci sesi | Ganti dengan `delete` per kunci bila kelak ada data lain di storage yang sama |
 | Tidak ada validasi token saat aplikasi dibuka | Token mati tetap dianggap sesi aktif sampai ada request 401 | Panggil endpoint ringan (mis. `GET /me`) di `AuthNotifier.build()` |
 | Badge bergantung pada launcher | Hanya launcher yang didukung ShortcutBadger yang menampilkan angka; Pixel/Infinix XOS hanya titik | Tidak bisa dipaksa dari aplikasi; angka di lonceng aplikasi tetap akurat |

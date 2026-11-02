@@ -14,26 +14,26 @@ alasan desain, lihat [`arsitektur.md`](arsitektur.md).
 
 | Berkas | Baris | Tanggung jawab |
 |---|---|---|
-| `lib/main.dart` | 89 | Bootstrap, `ProviderScope` (+ override `firebaseReadyProvider`), `MaterialApp.router`, memulai `PushController`, reload kotak masuk saat resume |
+| `lib/main.dart` | 116 | Bootstrap, `ProviderScope` (+ override `firebaseReadyProvider`), `MaterialApp.router`, memulai `PushController`, reload kotak masuk saat resume, pasang ulang FCM setelah login |
 | `lib/routes.dart` | 21 | Konstanta path tunggal (termasuk `/notifikasi`) |
 | `lib/data/token_store.dart` | 40 | Satu-satunya akses secure storage |
 | `lib/data/masking.dart` | 8 | `maskSecret()` |
 | `lib/data/auth_repository.dart` | 218 | Kontrak auth, `FirebaseAuthRepository`, `MockAuthRepository`, `authMessageFor()` |
 | `lib/data/api_client.dart` | 85 | `buildApiClient()`: Dio + interceptor 401 |
-| `lib/data/api_errors.dart` | 48 | `friendlyApiMessage()`, `AuthExpiredException` |
+| `lib/data/api_errors.dart` | 36 | `friendlyApiMessage()` |
 | `lib/data/device_repository.dart` | 48 | `POST` / `DELETE /devices` |
 | `lib/data/notification_store.dart` | 191 | `AppNotification`, `KeyValueStore`, `NotificationStore` (kotak masuk) |
-| `lib/data/badge_service.dart` | 28 | `BadgeService.setCount()` di atas `AppBadgePlus` |
+| `lib/data/badge_service.dart` | 34 | `BadgeService.setCount()` di atas `AppBadgePlus` |
 | `lib/data/relative_time.dart` | 20 | `relativeTime()` — "5 mnt lalu" |
 | `lib/messaging/firebase_bootstrap.dart` | 83 | Inisialisasi Firebase yang tidak fatal + handler background (mencatat ke kotak masuk) |
 | `lib/messaging/payload.dart` | 32 | `routeFromMessage()`, `idFromMessage()` |
-| `lib/messaging/push_service.dart` | 243 | Izin, token, topik, tiga handler, banner lokal, suara kustom |
-| `lib/providers/auth_provider.dart` | 143 | `firebaseReadyProvider`, provider auth, `AuthNotifier` |
-| `lib/providers/app_router.dart` | 70 | `GoRouter` + guard |
+| `lib/messaging/push_service.dart` | 295 | Izin, token, topik, tiga handler, banner lokal, suara kustom, `_messaging` malas + listener yang bisa dilepas |
+| `lib/providers/auth_provider.dart` | 145 | `firebaseReadyProvider`, provider auth, `AuthNotifier` |
+| `lib/providers/app_router.dart` | 75 | `GoRouter` + guard |
 | `lib/providers/notification_providers.dart` | 108 | `NotificationCenter` + sinkron badge |
-| `lib/providers/push_providers.dart` | 182 | `PushState`, `PushController` |
+| `lib/providers/push_providers.dart` | 231 | `PushState` (+ `copyWith` ber-sentinel), `PushController` (+ `detach`) |
 | `lib/pages/login_page.dart` | 214 | Form login |
-| `lib/pages/home_page.dart` | 316 | Beranda: sesi, aksi, status notifikasi, lonceng badge |
+| `lib/pages/home_page.dart` | 324 | Beranda: sesi, aksi, status notifikasi, lonceng badge, logout yang melepas perangkat |
 | `lib/pages/notifications_page.dart` | 204 | Daftar notifikasi belum dibaca (reload saat dibuka) |
 | `lib/pages/announcement_page.dart` | 80 | Target deep link `/pengumuman/:id` |
 
@@ -50,7 +50,7 @@ class CampusNotifyApp extends ConsumerStatefulWidget
 | Urutan bootstrap | `WidgetsFlutterBinding.ensureInitialized()` → `await bootstrapFirebase()` → `runApp(ProviderScope(...))` |
 | Tema | `ColorScheme.fromSeed(seedColor: Color(0xFF0B6E4F))`, light + dark, `debugShowCheckedModeBanner: false` |
 | Router | `ref.watch(appRouterProvider)` |
-| FCM | `initState` → `addPostFrameCallback` → `pushProvider.notifier.start(firebaseReady:, firebaseNote:)` |
+| FCM | `initState` → `addPostFrameCallback` → `_startPush()` → `pushProvider.notifier.start(firebaseReady:, firebaseNote:)`; `ref.listenManual(authStateProvider)` memanggil `_startPush()` lagi pada login berikutnya, karena logout sudah melepas perangkat dari backend |
 | Siklus hidup | `AppLifecycleListener(onResume:)` → `notificationsProvider.notifier.reload()` (menyusul entri yang ditulis handler background) |
 
 **Invarian:** `start()` tidak boleh dipanggil sebelum frame pertama; `routerConfig`
@@ -213,15 +213,10 @@ mati, refresh tidak tersimpan).
 
 ```dart
 String friendlyApiMessage(Object error);
-class AuthExpiredException implements Exception {
-  const AuthExpiredException([this.message = 'Sesi berakhir. Silakan login ulang.']);
-  final String message;
-}
 ```
 
 | Kondisi | Pesan |
 |---|---|
-| `AuthExpiredException` | `error.message` |
 | Timeout (connect/send/receive/transform) | "Koneksi lambat. Coba lagi sebentar." |
 | `connectionError` | "Tidak ada koneksi internet." |
 | 401 | "Sesi berakhir. Silakan login ulang." |
@@ -233,8 +228,10 @@ class AuthExpiredException implements Exception {
 | `badCertificate` | "Sertifikat server tidak valid." |
 | `unknown` / bukan `DioException` | "Terjadi kesalahan tak terduga." |
 
-**Catatan:** `AuthExpiredException` saat ini tidak dilempar di mana pun; ia hanya
-dikenali oleh `friendlyApiMessage`.
+**Catatan:** pesan "Sesi berakhir" berasal dari pemetaan status 401, bukan dari
+exception khusus. `AuthExpiredException` pernah didefinisikan di sini tetapi
+tidak pernah dilempar oleh kode mana pun, sehingga dihapus agar tidak ada jalur
+error yang tidak terpakai.
 
 ## `lib/data/device_repository.dart`
 
@@ -486,6 +483,7 @@ class PushController extends Notifier<PushState> {
   Future<void> start({required bool firebaseReady, String? firebaseNote});
   Future<void> sendTestNotification();
   Future<void> toggleTopic(bool subscribe);
+  Future<void> detach();
 }
 ```
 
@@ -494,13 +492,20 @@ class PushController extends Notifier<PushState> {
 | `start()` | Kembali bila `state.started`; bila `!firebaseReady` → `note` saja dan berhenti; `initLocalNotifications` → `requestPermission` → `initFcmToken(_registerToken)` → `subscribeCampusTopic` → `listenMessages(onRoute: _go, onNotification: _record, onOpened: _openFromNotification)` → `consumePendingDeepLink` |
 | `sendTestNotification()` | Catat ke kotak masuk **dan** tampilkan banner lokal "Jadwal kuliah berubah" → `/pengumuman/3` |
 | `toggleTopic(bool)` | `subscribe` / `unsubscribe` lalu perbarui `subscribedTopic` |
+| `detach()` | `unregisterDevice(token)` → `unsubscribeCampusTopic()` → kosongkan `token`, `registeredOnBackend`, `subscribedTopic`, `lastRoute`, `note`, dan set `started = false`. Dipanggil **sebelum** `logout()` karena `DELETE /devices` butuh header `Authorization` |
 | `_record()` | `notificationsProvider.add(...)` — menandai notifikasi belum dibaca |
 | `_openFromNotification()` | `markRead(messageId)` lalu `_go(route)`; diketuk berarti sudah dibaca |
 
-**Catatan `copyWith`:** parameter `null` berarti "pertahankan nilai lama", jadi
-`note` tidak bisa dikosongkan lewat `copyWith(note: null)`.
+**Catatan `copyWith`:** `token`, `lastRoute`, dan `note` memakai sentinel
+`_unset` sebagai nilai default, sehingga `copyWith(note: null)` berarti
+**mengosongkan**, sedangkan parameter yang tidak disebut mempertahankan nilai
+lama. Sebelumnya `null` dianggap "pertahankan", dan akibatnya catatan error
+(`POST /devices belum tersedia`) tidak pernah hilang meski pelaporan berikutnya
+berhasil.
 
-**Dikunci oleh:** tidak ada test khusus untuk `PushController`; logika kotak
+**Dikunci oleh:** `test/push_test.dart` (9 test: 5 untuk `PushState` termasuk
+`maskedToken`, 4 untuk `PushController` — `start`, catatan error yang hilang
+setelah pelaporan berhasil, `detach`, dan `detach` tanpa token). Logika kotak
 masuk yang dipanggilnya dikunci di `test/notification_test.dart`, sedangkan
 perilaku runtime terlihat di `screenshots/01-home-status-fcm.png`.
 
@@ -567,7 +572,7 @@ class _ErrorView extends StatelessWidget   // privat
 
 | Bagian | Isi |
 |---|---|
-| `AppBar` | Judul "Campus Notify", lonceng (`_NotificationBell`) → `/notifikasi`, tombol `Icons.logout` → `logout()` |
+| `AppBar` | Judul "Campus Notify", lonceng (`_NotificationBell`) → `/notifikasi`, tombol `Icons.logout` → `PushController.detach()` lalu `logout()` |
 | `_NotificationBell` | `Badge` Material 3 dengan angka `notificationsProvider.length`; label tersembunyi saat 0 |
 | Loading | `CircularProgressIndicator` saat `isLoading && !hasValue` |
 | Error | `_ErrorView` + tombol "Coba lagi" → `ref.invalidate(authStateProvider)` |
@@ -614,8 +619,9 @@ class AnnouncementPage extends StatelessWidget
 | `test/payload_test.dart` | 11 | `routeFromMessage` (4), `idFromMessage` (3), `sanitizeRoute` (2), `maskSecret` (2) |
 | `test/api_client_test.dart` | 3 | 401 → refresh → retry sukses; refresh mati → sesi dibersihkan tanpa retry; refresh tidak tersimpan → langsung bersihkan |
 | `test/auth_test.dart` | 8 | Guard route, sesi tersimpan, sesi setengah jadi, login valid/tidak valid, refresh sukses/ditolak, `maskedAccess` |
-| `test/notification_test.dart` | 23 | `AppNotification` (5), `NotificationStore` (6), `NotificationCenter` + badge (4), `relativeTime` (4), `authMessageFor` (3), widget test "dibaca → hilang" (1) |
-| **Total** | **45** | `flutter test` → `All tests passed!` |
+| `test/notification_test.dart` | 24 | `AppNotification` (5), `NotificationStore` (6), `NotificationCenter` + badge (5), `relativeTime` (4), `authMessageFor` (3), widget test "dibaca → hilang" (1) |
+| `test/push_test.dart` | 9 | `PushState.copyWith` (5, termasuk `null` yang mengosongkan), `PushController.start` / `detach` (4) |
+| **Total** | **55** | `flutter test` → `All tests passed!` |
 
 ### Alat bantu test yang bisa dipakai ulang
 
@@ -626,6 +632,8 @@ class AnnouncementPage extends StatelessWidget
 | `ScriptedAdapter` | `test/api_client_test.dart` | `HttpClientAdapter` palsu: 401 untuk token lama, 200 untuk token baru; merekam header |
 | `DeadRefreshRepository` / `_RenewingRepository` | `test/api_client_test.dart` | `AuthRepository` yang selalu gagal / selalu memberi access baru |
 | `RecordingBadgeService` | `test/notification_test.dart` | Merekam angka badge tanpa platform channel |
+| `FakePushService` | `test/push_test.dart` | `PushService` tanpa Firebase: merekam `subscribe`/`unsubscribe` dan menyimpan callback `onToken` agar test bisa meniru `onTokenRefresh` |
+| `FakeDeviceRepository` | `test/push_test.dart` | `DeviceRepository` tanpa jaringan: merekam token yang didaftarkan/dilepas dan bisa dibuat gagal |
 | `InMemoryKeyValueStore` | `lib/data/notification_store.dart` | Penyimpanan kotak masuk di memori |
 
 Pola penting: test widget memakai

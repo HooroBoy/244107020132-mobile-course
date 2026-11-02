@@ -5,8 +5,6 @@ import 'package:dio/dio.dart';
 /// UI tidak boleh menampilkan `DioException` mentah: isinya berisi URL,
 /// header, dan kadang token yang ikut tercetak di layar.
 String friendlyApiMessage(Object error) {
-  if (error is AuthExpiredException) return error.message;
-
   if (error is DioException) {
     switch (error.type) {
       case DioExceptionType.connectionTimeout:
@@ -35,14 +33,4 @@ String friendlyApiMessage(Object error) {
   }
 
   return 'Terjadi kesalahan tak terduga.';
-}
-
-/// Sesi tidak bisa dipulihkan: refresh token hilang atau ditolak server.
-class AuthExpiredException implements Exception {
-  const AuthExpiredException([this.message = 'Sesi berakhir. Silakan login ulang.']);
-
-  final String message;
-
-  @override
-  String toString() => message;
 }

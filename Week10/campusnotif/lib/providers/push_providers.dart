@@ -18,6 +18,12 @@ final Provider<DeviceRepository> deviceRepositoryProvider =
   (ref) => DeviceRepository(ref.watch(apiClientProvider)),
 );
 
+/// Penanda "argumen tidak diberikan" untuk [PushState.copyWith].
+///
+/// Diperlukan karena `null` pada parameter `String?` tidak bisa dibedakan dari
+/// "tidak diisi", padahal `copyWith(note: null)` harus bisa mengosongkan note.
+const Object _unset = Object();
+
 /// Status FCM yang ditampilkan di UI sebagai bukti pengujian.
 class PushState {
   const PushState({
@@ -43,25 +49,35 @@ class PushState {
   /// Token terpotong untuk ditampilkan / difoto.
   String get maskedToken => token == null ? '-' : maskSecret(token!);
 
+  /// Menyalin state dengan sebagian nilai diganti.
+  ///
+  /// [token], [lastRoute], dan [note] menerima `null` sebagai perintah
+  /// **mengosongkan** nilai lama — dipakai saat catatan error sudah tidak
+  /// berlaku atau saat perangkat dilepas ketika logout. Parameter yang tidak
+  /// disebut sama sekali dibedakan lewat [_unset].
   PushState copyWith({
     bool? started,
     bool? permissionGranted,
-    String? token,
+    Object? token = _unset,
     bool? registeredOnBackend,
     bool? subscribedTopic,
-    String? lastRoute,
-    String? note,
+    Object? lastRoute = _unset,
+    Object? note = _unset,
   }) {
     return PushState(
       started: started ?? this.started,
       permissionGranted: permissionGranted ?? this.permissionGranted,
-      token: token ?? this.token,
+      token: _stringOr(token, this.token),
       registeredOnBackend: registeredOnBackend ?? this.registeredOnBackend,
       subscribedTopic: subscribedTopic ?? this.subscribedTopic,
-      lastRoute: lastRoute ?? this.lastRoute,
-      note: note ?? this.note,
+      lastRoute: _stringOr(lastRoute, this.lastRoute),
+      note: _stringOr(note, this.note),
     );
   }
+
+  /// `null` berarti kosongkan; [_unset] berarti pertahankan nilai lama.
+  static String? _stringOr(Object? value, String? fallback) =>
+      identical(value, _unset) ? fallback : value as String?;
 }
 
 final NotifierProvider<PushController, PushState> pushProvider =
@@ -178,5 +194,38 @@ class PushController extends Notifier<PushState> {
       await _service.unsubscribeCampusTopic();
     }
     state = state.copyWith(subscribedTopic: subscribe);
+  }
+
+  /// Melepas perangkat dari backend lalu berhenti berlangganan topik kampus.
+  ///
+  /// Dipanggil **sebelum** sesi dihapus, karena `DELETE /devices` memakai
+  /// header `Authorization` dari interceptor. Kalau token dibersihkan lebih
+  /// dulu, permintaan itu ditolak 401 dan token perangkat tertinggal di
+  /// backend — pengguna yang sudah logout tetap menerima notifikasi.
+  ///
+  /// `started` dikembalikan ke `false` supaya `start()` bisa memasang ulang
+  /// FCM ketika pengguna login lagi tanpa menutup aplikasi.
+  Future<void> detach() async {
+    final String? token = state.token;
+    if (token != null && token.isNotEmpty) {
+      await ref.read(deviceRepositoryProvider).unregisterDevice(token: token);
+    }
+
+    if (state.subscribedTopic) {
+      try {
+        await _service.unsubscribeCampusTopic();
+      } on Object {
+        // Gagal berhenti berlangganan tidak boleh menghalangi logout.
+      }
+    }
+
+    state = state.copyWith(
+      started: false,
+      token: null,
+      registeredOnBackend: false,
+      subscribedTopic: false,
+      lastRoute: null,
+      note: null,
+    );
   }
 }

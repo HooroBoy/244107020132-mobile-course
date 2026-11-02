@@ -32,7 +32,7 @@ Dependensi runtime (dari `pubspec.yaml`):
 ```bash
 flutter pub get          # pasang dependensi
 flutter analyze          # harus: No issues found!
-flutter test             # harus: All tests passed! (46 test)
+flutter test             # harus: All tests passed! (55 test)
 flutter test test/payload_test.dart            # satu berkas
 flutter test --plain-name "401"                # satu test berdasarkan nama
 flutter run              # jalankan di perangkat/emulator
@@ -55,7 +55,7 @@ campusnotif/
 │   ├── providers/             # Riverpod: state, DI, router
 │   ├── messaging/             # FCM + local notification + parsing payload
 │   └── pages/                 # widget layar
-├── test/                      # 46 test
+├── test/                      # 55 test
 ├── tools/
 │   ├── send_fcm.py            # pengirim notifikasi uji (FCM HTTP v1)
 │   ├── send_fcm.ps1           # versi PowerShell (tanpa dependensi Python)

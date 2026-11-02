@@ -104,7 +104,7 @@ utama ponsel.
 | Membuka pengumuman | Ketuk "Jadwal kuliah berubah" | Halaman `/pengumuman/3` terbuka |
 | Menguji pembaruan sesi | Ketuk "Uji refresh token" | Pesan "Token diperbarui: …" (token terpotong) atau "Refresh ditolak. Sesi dihapus, silakan login ulang." |
 | Menampilkan notifikasi uji | Ketuk "Tampilkan notifikasi uji" | Banner muncul tanpa menunggu kiriman dari server; berguna untuk memastikan izin dan saluran notifikasi bekerja |
-| Keluar | Ikon di kanan atas | Sesi dihapus dan kembali ke layar masuk |
+| Keluar | Ikon di kanan atas | Perangkat dilepas dari backend, topik dihentikan, sesi dihapus, lalu kembali ke layar masuk |
 
 ## 6. Menerima notifikasi
 
@@ -230,7 +230,8 @@ selalu akurat, apa pun launcher-nya.
   (Android Keystore), bukan di berkas biasa.
 - Token selalu ditampilkan dalam bentuk terpotong; token utuh tidak pernah
   muncul di layar maupun di log aplikasi.
-- Saat keluar (logout), seluruh sesi dihapus dari perangkat.
+- Saat keluar (logout), perangkat dilepas dari backend dan langganan topik
+  dihentikan lebih dulu, lalu seluruh sesi dihapus dari perangkat.
 - Bila sesi tidak bisa diperpanjang lagi, aplikasi otomatis mengeluarkan Anda
   dan meminta login ulang — ini perilaku yang benar, bukan kerusakan.
 
